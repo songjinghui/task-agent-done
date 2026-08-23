@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest"
 import type { ConversationSummary } from "../shared/contracts.js"
-import { createTaskMuxApi, TaskMuxApiError } from "./api.js"
+import {
+  createTaskMuxApi,
+  TaskMuxApiError,
+  type TaskMuxApi,
+} from "./api.js"
 
 const summary: ConversationSummary = {
   id: "conversation / 1",
@@ -114,6 +118,205 @@ describe("TaskMux API", () => {
     })
   })
 
+  it("sanitizes valid DTOs instead of exposing unknown server fields", async () => {
+    const api = createTaskMuxApi(
+      sequenceFetcher([
+        jsonResponse({
+          status: "degraded",
+          error: {
+            code: "codex_not_authenticated",
+            message: "Sign in required.",
+            stderr: "provider diagnostic",
+          },
+          rawProvider: { method: "initialize" },
+        }),
+        jsonResponse([
+          {
+            ...summary,
+            codexThreadId: "provider-thread-secret",
+            rawProvider: { method: "thread/read" },
+          },
+        ]),
+        jsonResponse({
+          conversationId: summary.id,
+          rawProvider: { threadId: "provider-thread-secret" },
+          turns: [
+            {
+              id: "turn-1",
+              role: "assistant",
+              text: "历史回答",
+              status: "completed",
+              providerItem: { type: "agentMessage" },
+            },
+          ],
+        }),
+      ])
+    )
+
+    await expect(api.getHealth()).resolves.toEqual({
+      status: "degraded",
+      error: {
+        code: "codex_not_authenticated",
+        message: "Sign in required.",
+      },
+    })
+    await expect(api.listConversations()).resolves.toEqual([summary])
+    await expect(api.getConversation(summary.id)).resolves.toEqual({
+      conversationId: summary.id,
+      turns: [
+        {
+          id: "turn-1",
+          role: "assistant",
+          text: "历史回答",
+          status: "completed",
+        },
+      ],
+    })
+  })
+
+  it.each([
+    {
+      name: "non-JSON health",
+      response: new Response("not-json", { status: 200 }),
+      invoke: (api: TaskMuxApi) => api.getHealth(),
+    },
+    {
+      name: "unknown health status",
+      response: jsonResponse({ status: "starting" }),
+      invoke: (api: TaskMuxApi) => api.getHealth(),
+    },
+    {
+      name: "blank degraded health error",
+      response: jsonResponse({
+        status: "degraded",
+        error: { code: "", message: " " },
+      }),
+      invoke: (api: TaskMuxApi) => api.getHealth(),
+    },
+    {
+      name: "blank workspace",
+      response: jsonResponse({ workspace: " " }),
+      invoke: (api: TaskMuxApi) => api.getWorkspace(),
+    },
+    {
+      name: "non-array list",
+      response: jsonResponse({ conversations: [] }),
+      invoke: (api: TaskMuxApi) => api.listConversations(),
+    },
+    {
+      name: "invalid nested summary status",
+      response: jsonResponse([{ ...summary, status: "waiting" }]),
+      invoke: (api: TaskMuxApi) => api.listConversations(),
+    },
+    {
+      name: "invalid nested summary date",
+      response: jsonResponse([{ ...summary, updatedAt: "yesterday" }]),
+      invoke: (api: TaskMuxApi) => api.listConversations(),
+    },
+    {
+      name: "blank created conversation ID",
+      response: jsonResponse({ ...summary, id: "" }, 201),
+      invoke: (api: TaskMuxApi) => api.createConversation(),
+    },
+    {
+      name: "blank created conversation title",
+      response: jsonResponse({ ...summary, title: " " }, 201),
+      invoke: (api: TaskMuxApi) => api.createConversation(),
+    },
+    {
+      name: "mismatched detail conversation ID",
+      response: jsonResponse({ conversationId: "other", turns: [] }),
+      invoke: (api: TaskMuxApi) => api.getConversation(summary.id),
+    },
+    {
+      name: "invalid nested turn role",
+      response: jsonResponse({
+        conversationId: summary.id,
+        turns: [
+          {
+            id: "turn-1",
+            role: "tool",
+            text: "raw output",
+            status: "completed",
+          },
+        ],
+      }),
+      invoke: (api: TaskMuxApi) => api.getConversation(summary.id),
+    },
+    {
+      name: "blank nested turn ID",
+      response: jsonResponse({
+        conversationId: summary.id,
+        turns: [
+          {
+            id: " ",
+            role: "assistant",
+            text: "history",
+            status: "completed",
+          },
+        ],
+      }),
+      invoke: (api: TaskMuxApi) => api.getConversation(summary.id),
+    },
+    {
+      name: "invalid nested turn status",
+      response: jsonResponse({
+        conversationId: summary.id,
+        turns: [
+          {
+            id: "turn-1",
+            role: "assistant",
+            text: "partial",
+            status: "running",
+          },
+        ],
+      }),
+      invoke: (api: TaskMuxApi) => api.getConversation(summary.id),
+    },
+    {
+      name: "non-string nested turn text",
+      response: jsonResponse({
+        conversationId: summary.id,
+        turns: [
+          {
+            id: "turn-1",
+            role: "assistant",
+            text: { raw: "history" },
+            status: "completed",
+          },
+        ],
+      }),
+      invoke: (api: TaskMuxApi) => api.getConversation(summary.id),
+    },
+    {
+      name: "unaccepted message response",
+      response: jsonResponse({ accepted: false }, 202),
+      invoke: (api: TaskMuxApi) => api.sendMessage(summary.id, "hello"),
+    },
+    {
+      name: "non-204 cancel response",
+      response: new Response("unexpected", { status: 200 }),
+      invoke: (api: TaskMuxApi) => api.cancelConversation(summary.id),
+    },
+    {
+      name: "non-204 approval response",
+      response: new Response(null, { status: 200 }),
+      invoke: (api: TaskMuxApi) =>
+        api.respondToApproval(summary.id, "approval-1", "accept"),
+    },
+  ])("rejects malformed success: $name", async ({ response, invoke }) => {
+    const api = createTaskMuxApi(vi.fn<typeof fetch>(async () => response))
+
+    const error = await invoke(api).catch((value) => value)
+
+    expect(error).toBeInstanceOf(TaskMuxApiError)
+    expect(error).toMatchObject({
+      code: "invalid_response",
+      message: "Server returned an invalid response.",
+      status: response.status,
+    })
+  })
+
   it.each([
     new Response("not-json", {
       status: 503,
@@ -140,4 +343,8 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   })
+}
+
+function sequenceFetcher(responses: Response[]): typeof fetch {
+  return vi.fn<typeof fetch>(async () => responses.shift()!)
 }

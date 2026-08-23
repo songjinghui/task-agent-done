@@ -52,47 +52,79 @@ export class TaskMuxApiError extends Error {
 export function createTaskMuxApi(
   fetcher: typeof fetch = globalThis.fetch
 ): TaskMuxApi {
-  const request = async <T>(
+  const jsonRequest = async <T>(
     path: string,
-    init?: RequestInit,
-    empty = false
+    decode: (value: unknown) => T | null,
+    init?: RequestInit
   ): Promise<T> => {
     const response = await fetcher(path, init)
     if (!response.ok) throw await responseError(response)
-    if (empty) return undefined as T
-    return (await response.json()) as T
+
+    let body: unknown
+    try {
+      body = await response.json()
+    } catch {
+      throw invalidResponse(response.status)
+    }
+    const decoded = decode(body)
+    if (decoded === null) throw invalidResponse(response.status)
+    return decoded
+  }
+
+  const bodylessRequest = async (
+    path: string,
+    init?: RequestInit
+  ): Promise<void> => {
+    const response = await fetcher(path, init)
+    if (!response.ok) throw await responseError(response)
+    if (response.status !== 204) throw invalidResponse(response.status)
+
+    let body: string
+    try {
+      body = await response.text()
+    } catch {
+      throw invalidResponse(response.status)
+    }
+    if (body.length !== 0) throw invalidResponse(response.status)
   }
 
   return {
-    getHealth: () => request<TaskMuxHealth>("/api/health"),
-    getWorkspace: () => request<WorkspaceInfo>("/api/workspace"),
+    getHealth: () => jsonRequest("/api/health", decodeHealth),
+    getWorkspace: () => jsonRequest("/api/workspace", decodeWorkspace),
     listConversations: () =>
-      request<ConversationSummary[]>("/api/conversations"),
+      jsonRequest("/api/conversations", decodeConversationList),
     createConversation: () =>
-      request<ConversationSummary>("/api/conversations", { method: "POST" }),
-    getConversation: (conversationId) =>
-      request<ConversationDetail>(conversationPath(conversationId)),
-    sendMessage: (conversationId, text) =>
-      request<AcceptedMessage>(`${conversationPath(conversationId)}/messages`, {
+      jsonRequest("/api/conversations", decodeConversationSummary, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
       }),
+    getConversation: (conversationId) =>
+      jsonRequest(
+        conversationPath(conversationId),
+        (value) => decodeConversationDetail(value, conversationId)
+      ),
+    sendMessage: (conversationId, text) =>
+      jsonRequest(
+        `${conversationPath(conversationId)}/messages`,
+        decodeAcceptedMessage,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        }
+      ),
     cancelConversation: (conversationId) =>
-      request<void>(
+      bodylessRequest(
         `${conversationPath(conversationId)}/cancel`,
-        { method: "POST" },
-        true
+        { method: "POST" }
       ),
     respondToApproval: (conversationId, requestId, decision) =>
-      request<void>(
+      bodylessRequest(
         `${conversationPath(conversationId)}/approvals/${encodeURIComponent(requestId)}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ decision }),
-        },
-        true
+        }
       ),
   }
 }
@@ -119,6 +151,136 @@ async function responseError(response: Response): Promise<TaskMuxApiError> {
   } catch {
     return fallback
   }
+}
+
+function invalidResponse(status: number): TaskMuxApiError {
+  return new TaskMuxApiError(
+    "invalid_response",
+    "Server returned an invalid response.",
+    status
+  )
+}
+
+function decodeHealth(value: unknown): TaskMuxHealth | null {
+  if (!isRecord(value)) return null
+  if (value.status === "ok") return { status: "ok" }
+  if (
+    value.status !== "degraded" ||
+    !isRecord(value.error) ||
+    !nonBlankString(value.error.code) ||
+    !nonBlankString(value.error.message)
+  ) {
+    return null
+  }
+  return {
+    status: "degraded",
+    error: { code: value.error.code, message: value.error.message },
+  }
+}
+
+function decodeWorkspace(value: unknown): WorkspaceInfo | null {
+  if (!isRecord(value) || !nonBlankString(value.workspace)) return null
+  return { workspace: value.workspace }
+}
+
+function decodeConversationList(
+  value: unknown
+): ConversationSummary[] | null {
+  if (!Array.isArray(value)) return null
+  const conversations: ConversationSummary[] = []
+  for (const item of value) {
+    const conversation = decodeConversationSummary(item)
+    if (!conversation) return null
+    conversations.push(conversation)
+  }
+  return conversations
+}
+
+function decodeConversationSummary(
+  value: unknown
+): ConversationSummary | null {
+  if (
+    !isRecord(value) ||
+    !nonBlankString(value.id) ||
+    !nonBlankString(value.title) ||
+    !isConversationStatus(value.status) ||
+    !isDateString(value.createdAt) ||
+    !isDateString(value.updatedAt)
+  ) {
+    return null
+  }
+  return {
+    id: value.id,
+    title: value.title,
+    status: value.status,
+    createdAt: value.createdAt,
+    updatedAt: value.updatedAt,
+  }
+}
+
+function decodeConversationDetail(
+  value: unknown,
+  expectedConversationId: string
+): ConversationDetail | null {
+  if (
+    !isRecord(value) ||
+    value.conversationId !== expectedConversationId ||
+    !Array.isArray(value.turns)
+  ) {
+    return null
+  }
+  const turns: ConversationDetail["turns"] = []
+  for (const item of value.turns) {
+    const turn = decodeMessageTurn(item)
+    if (!turn) return null
+    turns.push(turn)
+  }
+  return { conversationId: expectedConversationId, turns }
+}
+
+function decodeMessageTurn(
+  value: unknown
+): ConversationDetail["turns"][number] | null {
+  if (
+    !isRecord(value) ||
+    !nonBlankString(value.id) ||
+    (value.role !== "user" && value.role !== "assistant") ||
+    typeof value.text !== "string" ||
+    (value.status !== "completed" &&
+      value.status !== "interrupted" &&
+      value.status !== "failed")
+  ) {
+    return null
+  }
+  return {
+    id: value.id,
+    role: value.role,
+    text: value.text,
+    status: value.status,
+  }
+}
+
+function decodeAcceptedMessage(value: unknown): AcceptedMessage | null {
+  return isRecord(value) && value.accepted === true ? { accepted: true } : null
+}
+
+function isConversationStatus(
+  value: unknown
+): value is ConversationSummary["status"] {
+  return (
+    value === "idle" ||
+    value === "running" ||
+    value === "failed" ||
+    value === "interrupted"
+  )
+}
+
+function isDateString(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(value) &&
+    Number.isFinite(Date.parse(value))
+  )
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

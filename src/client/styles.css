@@ -201,6 +201,10 @@ button:focus-visible {
 }
 
 .page-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
   max-width: 840px;
   margin: 24px auto 0;
   padding: 12px 16px;
@@ -208,6 +212,17 @@ button:focus-visible {
   background: #fff0ed;
   border: 1px solid #f2b8b0;
   border-radius: 10px;
+}
+
+.page-error button {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  color: inherit;
+  background: #fff;
+  border: 1px solid #d9877d;
+  border-radius: 7px;
+  cursor: pointer;
+  font-weight: 700;
 }
 
 .thread {

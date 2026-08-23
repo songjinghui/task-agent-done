@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest"
-import { cleanup, render, screen, within } from "@testing-library/react"
+import { act, cleanup, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import type {
@@ -169,7 +169,79 @@ describe("App", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("历史暂不可用")
     expect(screen.getByText("暂时无法显示此会话的历史。")).toBeVisible()
+    expect(screen.queryByText("还没有已完成的消息。")).not.toBeInTheDocument()
     expect(screen.queryByRole("article")).not.toBeInTheDocument()
+  })
+
+  it("retries failed history explicitly and renders the successful response", async () => {
+    let attempts = 0
+    const api = fakeApi({
+      listConversations: async () => [first],
+      getConversation: async () => {
+        attempts += 1
+        if (attempts === 1) throw new Error("历史暂不可用")
+        return detail(first.id, [turn("a1", "assistant", "重试后的历史")])
+      },
+    })
+    const user = userEvent.setup()
+    render(<App api={api} />)
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("历史暂不可用")
+    expect(screen.queryByText("还没有已完成的消息。")).not.toBeInTheDocument()
+
+    await user.click(
+      screen.getByRole("button", { name: /修复 README 测试/ })
+    )
+    expect(screen.getByRole("alert")).toHaveTextContent("历史暂不可用")
+    expect(screen.queryByText("还没有已完成的消息。")).not.toBeInTheDocument()
+    expect(attempts).toBe(1)
+
+    await user.click(screen.getByRole("button", { name: "重试" }))
+
+    expect(await screen.findByText("重试后的历史")).toBeVisible()
+    expect(attempts).toBe(2)
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument()
+  })
+
+  it("ignores a late retry result after switching conversations", async () => {
+    const retry = deferred<ConversationDetail>()
+    let firstAttempts = 0
+    const api = fakeApi({
+      listConversations: async () => [first, second],
+      getConversation: async (id) => {
+        if (id === second.id) {
+          return detail(second.id, [
+            turn("a2", "assistant", "当前会话历史"),
+          ])
+        }
+        firstAttempts += 1
+        if (firstAttempts === 1) throw new Error("历史暂不可用")
+        return retry.promise
+      },
+    })
+    const user = userEvent.setup()
+    render(<App api={api} />)
+    await screen.findByRole("alert")
+
+    await user.click(screen.getByRole("button", { name: "重试" }))
+    expect(screen.getByRole("status")).toHaveTextContent("正在加载历史")
+    expect(screen.queryByText("还没有已完成的消息。")).not.toBeInTheDocument()
+    await user.click(screen.getByRole("button", { name: /第二个会话/ }))
+    expect(await screen.findByText("当前会话历史")).toBeVisible()
+
+    await act(async () => {
+      retry.resolve(
+        detail(first.id, [turn("late", "assistant", "迟到的重试历史")])
+      )
+      await retry.promise
+    })
+
+    expect(screen.queryByText("迟到的重试历史")).not.toBeInTheDocument()
+    expect(screen.getByText("当前会话历史")).toBeVisible()
+    expect(
+      screen.getByRole("button", { name: /第二个会话/ })
+    ).toHaveAttribute("aria-current", "page")
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument()
   })
 
   it("recovers from a create failure without losing the empty workspace", async () => {

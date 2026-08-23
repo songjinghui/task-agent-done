@@ -28,7 +28,9 @@ export type ConversationState = {
   detailsById: Record<string, ConversationDetail>
   loading: ConversationLoadingState
   error: string | null
+  errorScope: "list" | "create" | "detail" | null
   detailRequest: { conversationId: string; requestId: number } | null
+  detailLoadGeneration: number
 }
 
 export const initialConversationState: ConversationState = {
@@ -39,7 +41,9 @@ export const initialConversationState: ConversationState = {
   detailsById: {},
   loading: { list: true, create: false, detail: false },
   error: null,
+  errorScope: null,
   detailRequest: null,
+  detailLoadGeneration: 0,
 }
 
 export type ConversationAction =
@@ -53,6 +57,7 @@ export type ConversationAction =
   | { type: "createSucceeded"; conversation: ConversationSummary }
   | { type: "createFailed"; message: string }
   | { type: "selected"; conversationId: string }
+  | { type: "retrySelectedDetail" }
   | { type: "detailRequested"; conversationId: string; requestId: number }
   | {
       type: "detailSucceeded"
@@ -85,6 +90,7 @@ export function conversationReducer(
         selectedId: order[0] ?? null,
         loading: { ...state.loading, list: false },
         error: null,
+        errorScope: null,
       }
     }
     case "listFailed":
@@ -92,12 +98,14 @@ export function conversationReducer(
         ...state,
         loading: { ...state.loading, list: false },
         error: action.message,
+        errorScope: "list",
       }
     case "createStarted":
       return {
         ...state,
         loading: { ...state.loading, create: true },
         error: null,
+        errorScope: null,
       }
     case "createSucceeded":
       return {
@@ -113,27 +121,50 @@ export function conversationReducer(
         selectedId: action.conversation.id,
         loading: { ...state.loading, create: false },
         error: null,
+        errorScope: null,
       }
     case "createFailed":
       return {
         ...state,
         loading: { ...state.loading, create: false },
         error: action.message,
+        errorScope: "create",
       }
     case "selected":
       if (!state.summariesById[action.conversationId]) return state
+      if (state.selectedId === action.conversationId) return state
       return {
         ...state,
         selectedId: action.conversationId,
         error: null,
+        errorScope: null,
+      }
+    case "retrySelectedDetail":
+      if (
+        !state.selectedId ||
+        state.errorScope !== "detail" ||
+        state.loading.detail
+      ) {
+        return state
+      }
+      return {
+        ...state,
+        loading: { ...state.loading, detail: true },
+        error: null,
+        errorScope: null,
+        detailLoadGeneration: state.detailLoadGeneration + 1,
       }
     case "detailRequested":
       if (state.selectedId !== action.conversationId) return state
       return {
         ...state,
         loading: { ...state.loading, detail: true },
-        detailRequest: action,
+        detailRequest: {
+          conversationId: action.conversationId,
+          requestId: action.requestId,
+        },
         error: null,
+        errorScope: null,
       }
     case "detailSucceeded":
       if (!isCurrentDetailRequest(state, action)) return state
@@ -146,6 +177,7 @@ export function conversationReducer(
         loading: { ...state.loading, detail: false },
         detailRequest: null,
         error: null,
+        errorScope: null,
       }
     case "detailFailed":
       if (!isCurrentDetailRequest(state, action)) return state
@@ -154,6 +186,7 @@ export function conversationReducer(
         loading: { ...state.loading, detail: false },
         detailRequest: null,
         error: action.message,
+        errorScope: "detail",
       }
   }
 }
@@ -181,6 +214,7 @@ export type ConversationStore = {
   selectedDetail: ConversationDetail | null
   createConversation(): Promise<void>
   select(conversationId: string): void
+  retrySelectedDetail(): void
 }
 
 const ConversationContext = createContext<ConversationStore | null>(null)
@@ -256,7 +290,7 @@ export function ConversationProvider({
     return () => {
       current = false
     }
-  }, [api, state.selectedId])
+  }, [api, state.detailLoadGeneration, state.selectedId])
 
   const createConversation = useCallback(async () => {
     if (createInFlight.current) return
@@ -280,6 +314,10 @@ export function ConversationProvider({
     dispatch({ type: "selected", conversationId })
   }, [])
 
+  const retrySelectedDetail = useCallback(() => {
+    dispatch({ type: "retrySelectedDetail" })
+  }, [])
+
   const value = useMemo<ConversationStore>(() => {
     const conversations = state.order.flatMap((id) => {
       const conversation = state.summariesById[id]
@@ -298,8 +336,9 @@ export function ConversationProvider({
       selectedDetail,
       createConversation,
       select,
+      retrySelectedDetail,
     }
-  }, [createConversation, select, state])
+  }, [createConversation, retrySelectedDetail, select, state])
 
   return (
     <ConversationContext.Provider value={value}>

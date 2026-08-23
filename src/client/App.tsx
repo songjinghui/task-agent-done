@@ -25,6 +25,7 @@ function Workspace(): ReactNode {
     selectedDetail,
     createConversation,
     select,
+    retrySelectedDetail,
   } = useConversations()
 
   return (
@@ -41,14 +42,19 @@ function Workspace(): ReactNode {
       <div className="work-area">
         {state.error ? (
           <div className="page-error" role="alert">
-            {state.error}
+            <span>{state.error}</span>
+            {state.errorScope === "detail" ? (
+              <button type="button" onClick={retrySelectedDetail}>
+                重试
+              </button>
+            ) : null}
           </div>
         ) : null}
         <Thread
           conversation={selectedConversation}
           detail={selectedDetail}
           loading={state.loading.detail}
-          unavailable={Boolean(state.error && state.selectedId)}
+          unavailable={state.errorScope === "detail"}
         />
       </div>
     </div>
