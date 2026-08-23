@@ -7,6 +7,8 @@ import {
 } from "./conversation-service.js"
 import type { EventHub } from "./event-hub.js"
 
+const MAX_CLIENT_REQUEST_ID_CODE_POINTS = 128
+
 export type AppError = {
   code: string
   message: string
@@ -66,8 +68,8 @@ export function registerHttpRoutes(
 
   app.post("/api/conversations/:id/messages", async (request, reply) => {
     const { id } = conversationParams(request.params)
-    const text = messageBody(request.body)
-    await options.service.sendText(id, text)
+    const { text, clientRequestId } = messageBody(request.body)
+    await options.service.sendText(id, text, clientRequestId)
     return reply.code(202).send({ accepted: true })
   })
 
@@ -170,18 +172,29 @@ function approvalParams(value: unknown): { id: string; requestId: string } {
   return { id, requestId: value.requestId }
 }
 
-function messageBody(value: unknown): string {
+function messageBody(value: unknown): {
+  text: string
+  clientRequestId?: string
+} {
+  const keys = isRecord(value) ? Object.keys(value) : []
   if (
     !isRecord(value) ||
-    Object.keys(value).length !== 1 ||
-    typeof value.text !== "string"
+    (keys.length !== 1 && keys.length !== 2) ||
+    !keys.includes("text") ||
+    keys.some((key) => key !== "text" && key !== "clientRequestId") ||
+    typeof value.text !== "string" ||
+    (value.clientRequestId !== undefined &&
+      (!nonBlankString(value.clientRequestId) ||
+        [...value.clientRequestId].length > MAX_CLIENT_REQUEST_ID_CODE_POINTS))
   ) {
     throw new HttpInputError(
       "invalid_request_body",
-      "Request body must contain only a text string."
+      "Request body must contain text and an optional client request ID."
     )
   }
-  return value.text
+  return value.clientRequestId === undefined
+    ? { text: value.text }
+    : { text: value.text, clientRequestId: value.clientRequestId }
 }
 
 function approvalBody(value: unknown): "accept" | "decline" {

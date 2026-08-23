@@ -63,8 +63,13 @@ export type ConversationEvent =
 
 export type ConversationEventEnvelope = {
   conversationId: string
+  clientRequestId?: string
   seq: number
   payload: ConversationEvent
+}
+
+export type ConversationEventMetadata = {
+  clientRequestId?: string
 }
 
 export function isApprovalDecision(value: unknown): value is ApprovalDecision {

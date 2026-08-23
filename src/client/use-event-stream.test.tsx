@@ -175,13 +175,27 @@ describe("live conversation reducer", () => {
       requestId: "send-1",
       text: "相同问题",
     })
-    state = receive(state, 1, "c1", { type: "turn_started", turnId: "t1" })
-    state = receive(state, 2, "c1", {
-      type: "text_delta",
-      turnId: "t1",
-      text: "相同回答",
-    })
-    state = receive(state, 3, "c1", { type: "turn_completed", turnId: "t1" })
+    state = receive(
+      state,
+      1,
+      "c1",
+      { type: "turn_started", turnId: "t1" },
+      "send-1"
+    )
+    state = receive(
+      state,
+      2,
+      "c1",
+      { type: "text_delta", turnId: "t1", text: "相同回答" },
+      "send-1"
+    )
+    state = receive(
+      state,
+      3,
+      "c1",
+      { type: "turn_completed", turnId: "t1" },
+      "send-1"
+    )
     state = conversationReducer(state, {
       type: "detailRequested",
       conversationId: "c1",
@@ -437,7 +451,13 @@ describe("live conversation reducer", () => {
       requestId: "send-2",
       text: "已被服务接受",
     })
-    state = receive(state, 10, "c1", { type: "turn_started", turnId: "t2" })
+    state = receive(
+      state,
+      10,
+      "c1",
+      { type: "turn_started", turnId: "t2" },
+      "send-2"
+    )
     state = conversationReducer(state, {
       type: "sendRejected",
       conversationId: "c1",
@@ -463,7 +483,7 @@ describe("live conversation reducer", () => {
         requestId: "send-evidence",
         text: "服务已接收",
       })
-      state = receive(state, 1, "c1", event)
+      state = receive(state, 1, "c1", event, "send-evidence")
       state = conversationReducer(state, {
         type: "sendRejected",
         conversationId: "c1",
@@ -474,6 +494,56 @@ describe("live conversation reducer", () => {
       expect(
         selectDisplayedTurns(state, "c1").map((turn) => turn.text)
       ).toEqual(["服务已接收"])
+      expect(state.liveByConversationId.c1?.pendingSend).toBeNull()
+      expect(state.liveByConversationId.c1?.sendError).toBe("发送失败，请重试。")
+      expect(state.liveByConversationId.c1?.status).toBe("running")
+      expect(state.summariesById.c1?.status).toBe("running")
+      expect(isConversationActive(state, "c1")).toBe(true)
+    }
+  )
+
+  it.each([
+    {
+      name: "old tool status",
+      event: tool("old-evidence-tool", "running"),
+      clientRequestId: "send-old",
+    },
+    {
+      name: "unowned tool status",
+      event: tool("unowned-evidence-tool", "running"),
+      clientRequestId: undefined,
+    },
+    {
+      name: "old approval request",
+      event: approval("old-evidence-approval"),
+      clientRequestId: "send-old",
+    },
+    {
+      name: "unowned approval request",
+      event: approval("unowned-evidence-approval"),
+      clientRequestId: undefined,
+    },
+  ])(
+    "does not let $name claim a newer pending send",
+    ({ event, clientRequestId }) => {
+      let state = loadedState()
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-new",
+        text: "必须回滚的新请求",
+      })
+      state = receive(state, 1, "c1", event, clientRequestId)
+      state = conversationReducer(state, {
+        type: "sendRejected",
+        conversationId: "c1",
+        requestId: "send-new",
+        message: "conflict",
+      })
+
+      expect(
+        selectDisplayedTurns(state, "c1").map((turn) => turn.text)
+      ).not.toContain("必须回滚的新请求")
       expect(state.liveByConversationId.c1?.pendingSend).toBeNull()
       expect(state.liveByConversationId.c1?.sendError).toBe("发送失败，请重试。")
       expect(state.liveByConversationId.c1?.status).toBe("running")
@@ -495,19 +565,27 @@ describe("live conversation reducer", () => {
       requestId: "send-terminal-first",
       text: "先终态后 HTTP",
     })
-    state = receive(state, 1, "c1", {
-      type: "turn_started",
-      turnId: "terminal-first",
-    })
-    state = receive(state, 2, "c1", {
-      type: "text_delta",
-      turnId: "terminal-first",
-      text: "完成",
-    })
-    state = receive(state, 3, "c1", {
-      type: "turn_completed",
-      turnId: "terminal-first",
-    })
+    state = receive(
+      state,
+      1,
+      "c1",
+      { type: "turn_started", turnId: "terminal-first" },
+      "send-terminal-first"
+    )
+    state = receive(
+      state,
+      2,
+      "c1",
+      { type: "text_delta", turnId: "terminal-first", text: "完成" },
+      "send-terminal-first"
+    )
+    state = receive(
+      state,
+      3,
+      "c1",
+      { type: "turn_completed", turnId: "terminal-first" },
+      "send-terminal-first"
+    )
 
     expect(state.liveByConversationId.c1?.pendingSend).toMatchObject({
       requestId: "send-terminal-first",
@@ -540,14 +618,20 @@ describe("live conversation reducer", () => {
       requestId: "send-rejected-late",
       text: "已接受但响应失败",
     })
-    state = receive(state, 1, "c1", {
-      type: "turn_started",
-      turnId: "accepted-turn",
-    })
-    state = receive(state, 2, "c1", {
-      type: "turn_completed",
-      turnId: "accepted-turn",
-    })
+    state = receive(
+      state,
+      1,
+      "c1",
+      { type: "turn_started", turnId: "accepted-turn" },
+      "send-rejected-late"
+    )
+    state = receive(
+      state,
+      2,
+      "c1",
+      { type: "turn_completed", turnId: "accepted-turn" },
+      "send-rejected-late"
+    )
     state = conversationReducer(state, {
       type: "sendRejected",
       conversationId: "c1",
@@ -605,9 +689,24 @@ describe("useEventStream", () => {
     act(() => {
       source.message("not json")
       source.message(JSON.stringify({ conversationId: "c1", seq: 1 }))
+      for (const [seq, clientRequestId] of [
+        [2, 42],
+        [3, " \n "],
+        [5, "😀".repeat(129)],
+      ] as const) {
+        source.message(
+          JSON.stringify({
+            conversationId: "c1",
+            clientRequestId,
+            seq,
+            payload: { type: "turn_started", turnId: "invalid-metadata" },
+          })
+        )
+      }
       source.message(
         JSON.stringify({
           conversationId: "c1",
+          clientRequestId: "send-safe-1",
           seq: 4,
           operationId: "must-not-enter-client",
           payload: {
@@ -642,6 +741,7 @@ describe("useEventStream", () => {
         type: "eventReceived",
         envelope: {
           conversationId: "c1",
+          clientRequestId: "send-safe-1",
           seq: 4,
           payload: { type: "text_delta", turnId: "t1", text: "hello" },
         },
@@ -774,10 +874,12 @@ function receive(
   state: ConversationState,
   seq: number,
   conversationId: string,
-  payload: ConversationEvent
+  payload: ConversationEvent,
+  clientRequestId?: string
 ): ConversationState {
   const envelope: ConversationEventEnvelope = {
     conversationId,
+    ...(clientRequestId === undefined ? {} : { clientRequestId }),
     seq,
     payload,
   }

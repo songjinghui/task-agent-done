@@ -51,6 +51,37 @@ describe("EventHub", () => {
     expect(Object.isFrozen(event.payload.tool)).toBe(true)
   })
 
+  it("publishes only immutable browser-safe client request metadata", () => {
+    const hub = new EventHub()
+    const received: ConversationEventEnvelope[] = []
+    const metadata = {
+      clientRequestId: "client-safe-1",
+      operationId: "provider-secret",
+    }
+    hub.subscribe((event) => received.push(event))
+
+    hub.publish(
+      "c1",
+      { type: "approval_requested", request: { id: "a1", kind: "command", label: "run" } },
+      metadata
+    )
+    metadata.clientRequestId = "mutated"
+
+    expect(received).toEqual([
+      {
+        conversationId: "c1",
+        clientRequestId: "client-safe-1",
+        seq: 1,
+        payload: {
+          type: "approval_requested",
+          request: { id: "a1", kind: "command", label: "run" },
+        },
+      },
+    ])
+    expect(JSON.stringify(received)).not.toContain("operationId")
+    expect(Object.isFrozen(received[0])).toBe(true)
+  })
+
   it("isolates listener failures and keeps delivering to other subscribers", () => {
     const hub = new EventHub()
     const received: ConversationEventEnvelope[] = []

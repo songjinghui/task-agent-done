@@ -390,7 +390,7 @@ describe("App", () => {
     const input = screen.getByRole("textbox", { name: "消息" })
 
     await user.type(input, "执行测试{enter}")
-    expect(sendMessage).toHaveBeenCalledWith(first.id, "执行测试")
+    expect(sendMessage).toHaveBeenCalledWith(first.id, "执行测试", "send-1")
     expect(input).toHaveValue("执行测试")
     expect(screen.getByText("执行测试", { selector: ".message-text" })).toBeVisible()
 
@@ -448,10 +448,15 @@ describe("App", () => {
     const input = screen.getByRole("textbox", { name: "消息" })
     await user.type(input, "响应丢失{enter}")
     act(() => {
-      FakeEventSource.instances[0]!.event(1, first.id, {
-        type: "turn_started",
-        turnId: "t1",
-      })
+      FakeEventSource.instances[0]!.event(
+        1,
+        first.id,
+        {
+          type: "turn_started",
+          turnId: "t1",
+        },
+        "send-1"
+      )
     })
     response.reject(new Error("provider transport secret"))
 
@@ -888,16 +893,24 @@ describe("App", () => {
     const source = FakeEventSource.instances[0]!
     act(() => {
       source.open()
-      source.event(1, first.id, { type: "turn_started", turnId: "live-turn" })
-      source.event(2, first.id, {
-        type: "text_delta",
-        turnId: "live-turn",
-        text: "同步回答",
-      })
-      source.event(3, first.id, {
-        type: "turn_completed",
-        turnId: "live-turn",
-      })
+      source.event(
+        1,
+        first.id,
+        { type: "turn_started", turnId: "live-turn" },
+        "send-1"
+      )
+      source.event(
+        2,
+        first.id,
+        { type: "text_delta", turnId: "live-turn", text: "同步回答" },
+        "send-1"
+      )
+      source.event(
+        3,
+        first.id,
+        { type: "turn_completed", turnId: "live-turn" },
+        "send-1"
+      )
     })
 
     await waitFor(() => expect(detailCalls).toBe(2))
@@ -1140,11 +1153,12 @@ class FakeEventSource {
   event(
     seq: number,
     conversationId: string,
-    payload: import("../shared/contracts.js").ConversationEvent
+    payload: import("../shared/contracts.js").ConversationEvent,
+    clientRequestId?: string
   ): void {
     this.onmessage?.(
       new MessageEvent("message", {
-        data: JSON.stringify({ conversationId, seq, payload }),
+        data: JSON.stringify({ conversationId, seq, payload, clientRequestId }),
       })
     )
   }

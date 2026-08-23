@@ -352,7 +352,7 @@ describe("HTTP routes", () => {
     const accepted = await harness.app.inject({
       method: "POST",
       url: `/api/conversations/${first.id}/messages`,
-      payload: { text: "one" },
+      payload: { text: "one", clientRequestId: "send-safe-1" },
     })
     const conflict = await harness.app.inject({
       method: "POST",
@@ -366,7 +366,7 @@ describe("HTTP routes", () => {
     expect(conflict.json()).toEqual({
       error: {
         code: "invalid_request_body",
-        message: "Request body must contain only a text string.",
+        message: "Request body must contain text and an optional client request ID.",
       },
     })
 
@@ -387,6 +387,12 @@ describe("HTTP routes", () => {
     ["non-string", { text: 42 }],
     ["blank", { text: " \n " }],
     ["extra fields", { text: "hello", externalSessionId: "thread-secret" }],
+    ["non-string client request ID", { text: "hello", clientRequestId: 42 }],
+    ["blank client request ID", { text: "hello", clientRequestId: " \n " }],
+    [
+      "long client request ID",
+      { text: "hello", clientRequestId: "😀".repeat(129) },
+    ],
   ])("rejects an invalid messages body: %s", async (_label, payload) => {
     const harness = await createHarness()
     const conversation = await createConversation(harness)
@@ -641,10 +647,11 @@ describe("SSE transport", () => {
       type: "text_delta",
       turnId: "t1",
       text: "hello",
-    })
+    }, { clientRequestId: "client-safe-1" })
     const frame = await readSseFrame(stream.reader)
     const data = JSON.stringify({
       conversationId: "c1",
+      clientRequestId: "client-safe-1",
       seq: 2,
       payload: { type: "text_delta", turnId: "t1", text: "hello" },
     })

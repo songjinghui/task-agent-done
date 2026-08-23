@@ -8,6 +8,8 @@ import type {
 } from "../shared/contracts.js"
 import type { ConversationAction } from "./conversation-store.js"
 
+const MAX_CLIENT_REQUEST_ID_CODE_POINTS = 128
+
 export type EventStreamState = {
   status: "connecting" | "connected" | "disconnected"
 }
@@ -75,9 +77,23 @@ function decodeEnvelope(data: string): ConversationEventEnvelope | null {
   ) {
     return null
   }
+  if (
+    value.clientRequestId !== undefined &&
+    (!nonBlankString(value.clientRequestId) ||
+      [...value.clientRequestId].length > MAX_CLIENT_REQUEST_ID_CODE_POINTS)
+  ) {
+    return null
+  }
   const payload = decodePayload(value.payload)
   return payload
-    ? { conversationId: value.conversationId, seq: value.seq as number, payload }
+    ? {
+        conversationId: value.conversationId,
+        ...(value.clientRequestId === undefined
+          ? {}
+          : { clientRequestId: value.clientRequestId }),
+        seq: value.seq as number,
+        payload,
+      }
     : null
 }
 

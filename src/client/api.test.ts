@@ -56,9 +56,9 @@ describe("TaskMux API", () => {
         },
       ],
     })
-    await expect(api.sendMessage(summary.id, "hello\nworld")).resolves.toEqual({
-      accepted: true,
-    })
+    await expect(
+      api.sendMessage(summary.id, "hello\nworld", "send-safe-1")
+    ).resolves.toEqual({ accepted: true })
     await expect(api.cancelConversation(summary.id)).resolves.toBeUndefined()
     await expect(
       api.respondToApproval(summary.id, "approval / 1", "decline")
@@ -75,7 +75,10 @@ describe("TaskMux API", () => {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: "hello\nworld" }),
+          body: JSON.stringify({
+            text: "hello\nworld",
+            clientRequestId: "send-safe-1",
+          }),
         },
       ],
       [

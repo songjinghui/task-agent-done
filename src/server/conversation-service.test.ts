@@ -129,10 +129,21 @@ class RecordingEventSink implements ConversationEventSink {
   readonly events: Array<{
     conversationId: string
     payload: ConversationEvent
+    clientRequestId?: string
   }> = []
 
-  publish(conversationId: string, payload: ConversationEvent): void {
-    this.events.push({ conversationId, payload })
+  publish(
+    conversationId: string,
+    payload: ConversationEvent,
+    metadata?: { clientRequestId?: string }
+  ): void {
+    this.events.push({
+      conversationId,
+      payload,
+      ...(metadata?.clientRequestId === undefined
+        ? {}
+        : { clientRequestId: metadata.clientRequestId }),
+    })
   }
 }
 
@@ -525,6 +536,46 @@ describe("ConversationService", () => {
       turnId: "t2",
     })
     await expect(service.sendText(other.id, "allowed")).resolves.toBeUndefined()
+  })
+
+  it("publishes only the current TaskMux client request ID after operation filtering", async () => {
+    const { adapter, eventSink, service } = createHarness()
+    const conversation = await service.create()
+    await service.sendText(conversation.id, "old", "client-old")
+    const oldOperationId = adapter.operationId("session-1")!
+    adapter.emit("session-1", { type: "turn_completed", turnId: "t1" })
+
+    await service.sendText(conversation.id, "new", "client-new")
+    const newOperationId = adapter.operationId("session-1")!
+    eventSink.events.length = 0
+    adapter.emit(
+      "session-1",
+      {
+        type: "tool_status",
+        tool: { id: "old-tool", label: "old", status: "running" },
+      },
+      oldOperationId
+    )
+    adapter.emit(
+      "session-1",
+      {
+        type: "approval_requested",
+        request: { id: "new-approval", kind: "command", label: "new" },
+      },
+      newOperationId
+    )
+
+    expect(eventSink.events).toEqual([
+      {
+        conversationId: conversation.id,
+        clientRequestId: "client-new",
+        payload: {
+          type: "approval_requested",
+          request: { id: "new-approval", kind: "command", label: "new" },
+        },
+      },
+    ])
+    expect(JSON.stringify(eventSink.events)).not.toContain("operationId")
   })
 
   it("marks a failed send and releases exactly that turn ownership", async () => {

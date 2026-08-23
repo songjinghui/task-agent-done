@@ -3,6 +3,7 @@ import type {
   ApprovalDecision,
   ConversationDetail,
   ConversationEvent,
+  ConversationEventMetadata,
   ConversationStatus,
   ConversationSummary,
 } from "../shared/contracts.js"
@@ -19,13 +20,18 @@ const MAX_TITLE_CODE_POINTS = 60
 type ActiveTurn = {
   externalSessionId: string
   operationId: string
+  clientRequestId?: string
   turnId?: string
   titleCandidate: string
   titleApplied: boolean
 }
 
 export type ConversationEventSink = {
-  publish(conversationId: string, payload: ConversationEvent): void
+  publish(
+    conversationId: string,
+    payload: ConversationEvent,
+    metadata?: Readonly<ConversationEventMetadata>
+  ): void
 }
 
 export type ConversationServiceOptions = {
@@ -88,7 +94,11 @@ export class ConversationService {
     return { conversationId, turns }
   }
 
-  async sendText(conversationId: string, text: string): Promise<void> {
+  async sendText(
+    conversationId: string,
+    text: string,
+    clientRequestId?: string
+  ): Promise<void> {
     const conversation = this.#requireConversation(conversationId)
     validatePrompt(text)
     if (this.#activeConversationId !== null) {
@@ -101,6 +111,7 @@ export class ConversationService {
     const ownership: ActiveTurn = {
       externalSessionId: conversation.externalSessionId,
       operationId: randomUUID(),
+      ...(clientRequestId === undefined ? {} : { clientRequestId }),
       titleCandidate: titleFromPrompt(text),
       titleApplied: false,
     }
@@ -212,12 +223,16 @@ export class ConversationService {
         if (this.#cancellationRequests.get(conversationId) === ownership) {
           this.#cancellationRequests.delete(conversationId)
         }
-        this.#eventSink.publish(conversationId, {
-          type: "error",
-          code: "turn_cancel_failed",
-          message: "Failed to cancel the active turn.",
-          terminal: false,
-        })
+        this.#eventSink.publish(
+          conversationId,
+          {
+            type: "error",
+            code: "turn_cancel_failed",
+            message: "Failed to cancel the active turn.",
+            terminal: false,
+          },
+          clientMetadata(ownership)
+        )
       }
       throw error
     }
@@ -281,7 +296,18 @@ export class ConversationService {
       this.#finishActiveTurn(conversation.id, "failed", ownership)
     }
 
-    this.#eventSink.publish(conversation.id, event.payload)
+    const eventOwnership =
+      turnBoundPayload(event.payload) ||
+      (event.payload.type === "error" &&
+        event.payload.terminal &&
+        event.payload.scope === "session")
+        ? ownership
+        : undefined
+    this.#eventSink.publish(
+      conversation.id,
+      event.payload,
+      clientMetadata(eventOwnership)
+    )
   }
 
   #acceptActiveTurn(
@@ -300,12 +326,16 @@ export class ConversationService {
           this.#repository.updateTitle(conversationId, ownership.titleCandidate)
         }
       } catch {
-        this.#eventSink.publish(conversationId, {
-          type: "error",
-          code: "conversation_title_update_failed",
-          message: "Failed to update the conversation title.",
-          terminal: false,
-        })
+        this.#eventSink.publish(
+          conversationId,
+          {
+            type: "error",
+            code: "conversation_title_update_failed",
+            message: "Failed to update the conversation title.",
+            terminal: false,
+          },
+          clientMetadata(ownership)
+        )
       }
     }
     return true
@@ -379,4 +409,12 @@ function turnBoundPayload(payload: ConversationEvent): boolean {
     payload.type === "turn_interrupted" ||
     (payload.type === "error" && payload.terminal && payload.scope === "turn")
   )
+}
+
+function clientMetadata(
+  ownership: ActiveTurn | undefined
+): ConversationEventMetadata | undefined {
+  return ownership?.clientRequestId === undefined
+    ? undefined
+    : { clientRequestId: ownership.clientRequestId }
 }

@@ -12,6 +12,7 @@ import type {
   ApprovalDecision,
   ApprovalRequest,
   ConversationDetail,
+  ConversationEvent,
   ConversationEventEnvelope,
   ConversationStatus,
   ConversationSummary,
@@ -79,6 +80,7 @@ export type LiveConversationState = {
     submittedText: string
     previousStatus: ConversationSummary["status"]
     acceptedByEvent: boolean
+    turnActivityObserved: boolean
   } | null
   error: string | null
 }
@@ -427,6 +429,7 @@ export function conversationReducer(
             submittedText: action.text,
             previousStatus,
             acceptedByEvent: false,
+            turnActivityObserved: false,
           },
           sendError: null,
           error: null,
@@ -448,10 +451,11 @@ export function conversationReducer(
       const live = state.liveByConversationId[action.conversationId]
       const pending = live?.pendingSend
       if (!live || !pending || pending.requestId !== action.requestId) return state
-      const accepted = pending.acceptedByEvent || live.activeTurnId !== null
+      const accepted = pending.acceptedByEvent
+      const keepLiveState = accepted || pending.turnActivityObserved
       const nextLive: LiveConversationState = {
         ...live,
-        status: accepted ? live.status : pending.previousStatus,
+        status: keepLiveState ? live.status : pending.previousStatus,
         transientTurns: accepted
           ? live.transientTurns
           : live.transientTurns.filter(
@@ -462,7 +466,7 @@ export function conversationReducer(
         error: live.error,
       }
       const next = withLive(state, action.conversationId, nextLive)
-      return accepted
+      return keepLiveState
         ? next
         : withSummaryStatus(next, action.conversationId, pending.previousStatus)
     }
@@ -526,7 +530,10 @@ function reduceEvent(
   if (envelope.seq <= state.lastEventSeq) return state
   const stateWithSeq = { ...state, lastEventSeq: envelope.seq }
   const conversationId = envelope.conversationId
-  const live = liveFor(stateWithSeq, conversationId)
+  const live = observeEventForPendingSend(
+    liveFor(stateWithSeq, conversationId),
+    envelope
+  )
   const payload = envelope.payload
 
   switch (payload.type) {
@@ -536,9 +543,6 @@ function reduceEvent(
         status: "running",
         activeTurnId: payload.turnId,
         error: null,
-        pendingSend: live.pendingSend
-          ? { ...live.pendingSend, acceptedByEvent: true }
-          : null,
       }
       return withLive(
         withSummaryStatus(stateWithSeq, conversationId, "running"),
@@ -559,9 +563,6 @@ function reduceEvent(
           [payload.turnId]:
             (live.textByTurnId[payload.turnId] ?? "") + payload.text,
         },
-        pendingSend: live.pendingSend
-          ? { ...live.pendingSend, acceptedByEvent: true }
-          : null,
       }
       return withLive(
         withSummaryStatus(stateWithSeq, conversationId, "running"),
@@ -574,26 +575,26 @@ function reduceEvent(
       return withLive(
         withSummaryStatus(stateWithSeq, conversationId, "running"),
         conversationId,
-        markSendAccepted({
+        {
           ...live,
           status: "running",
           toolsById: { ...live.toolsById, [payload.tool.id]: payload.tool },
           toolOrder: known
             ? live.toolOrder
             : [...live.toolOrder, payload.tool.id],
-        })
+        }
       )
     }
     case "approval_requested":
       return withLive(
         withSummaryStatus(stateWithSeq, conversationId, "running"),
         conversationId,
-        markSendAccepted({
+        {
           ...live,
           status: "running",
           approval: payload.request,
           approvalError: null,
-        })
+        }
       )
     case "turn_completed": {
       if (live.activeTurnId && live.activeTurnId !== payload.turnId) {
@@ -669,13 +670,27 @@ function reduceEvent(
   }
 }
 
-function markSendAccepted(live: LiveConversationState): LiveConversationState {
-  return live.pendingSend
-    ? {
-        ...live,
-        pendingSend: { ...live.pendingSend, acceptedByEvent: true },
-      }
-    : live
+function observeEventForPendingSend(
+  live: LiveConversationState,
+  envelope: ConversationEventEnvelope
+): LiveConversationState {
+  if (!live.pendingSend) return live
+  return {
+    ...live,
+    pendingSend: {
+      ...live.pendingSend,
+      acceptedByEvent:
+        live.pendingSend.acceptedByEvent ||
+        envelope.clientRequestId === live.pendingSend.requestId,
+      turnActivityObserved:
+        live.pendingSend.turnActivityObserved ||
+        isTurnActivity(envelope.payload),
+    },
+  }
+}
+
+function isTurnActivity(payload: ConversationEvent): boolean {
+  return payload.type !== "error" || payload.terminal
 }
 
 function syncSelectedDetailAfterTerminal(
@@ -728,9 +743,7 @@ function terminalLive(
     toolOrder: [],
     approval: null,
     approvalError: null,
-    pendingSend: live.pendingSend
-      ? { ...live.pendingSend, acceptedByEvent: true }
-      : null,
+    pendingSend: live.pendingSend,
     cancelPending: false,
     cancelRequestId: null,
     ...overrides,
@@ -1144,7 +1157,7 @@ export function ConversationProvider({
         text,
       })
       try {
-        await api.sendMessage(conversationId, text)
+        await api.sendMessage(conversationId, text, requestId)
         if (mounted.current) {
           dispatch({ type: "sendSucceeded", conversationId, requestId })
         }

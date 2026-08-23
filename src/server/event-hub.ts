@@ -1,6 +1,7 @@
 import type {
   ConversationEvent,
   ConversationEventEnvelope,
+  ConversationEventMetadata,
 } from "../shared/contracts.js"
 
 export type ConversationEventHandler = (
@@ -15,9 +16,16 @@ export class EventHub {
     return this.#subscribers.size
   }
 
-  publish(conversationId: string, payload: ConversationEvent): void {
+  publish(
+    conversationId: string,
+    payload: ConversationEvent,
+    metadata?: Readonly<ConversationEventMetadata>
+  ): void {
     const envelope = immutableSnapshot({
       conversationId,
+      ...(metadata?.clientRequestId === undefined
+        ? {}
+        : { clientRequestId: metadata.clientRequestId }),
       seq: this.#nextSequence++,
       payload,
     })

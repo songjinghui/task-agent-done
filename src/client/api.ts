@@ -27,7 +27,8 @@ export interface TaskMuxApi {
   getConversation(conversationId: string): Promise<ConversationDetail>
   sendMessage(
     conversationId: string,
-    text: string
+    text: string,
+    clientRequestId?: string
   ): Promise<AcceptedMessage>
   cancelConversation(conversationId: string): Promise<void>
   respondToApproval(
@@ -102,14 +103,17 @@ export function createTaskMuxApi(
         conversationPath(conversationId),
         (value) => decodeConversationDetail(value, conversationId)
       ),
-    sendMessage: (conversationId, text) =>
+    sendMessage: (conversationId, text, clientRequestId) =>
       jsonRequest(
         `${conversationPath(conversationId)}/messages`,
         decodeAcceptedMessage,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text }),
+          body: JSON.stringify({
+            text,
+            ...(clientRequestId === undefined ? {} : { clientRequestId }),
+          }),
         }
       ),
     cancelConversation: (conversationId) =>
