@@ -295,7 +295,7 @@ describe("live conversation reducer", () => {
       state = receive(state, 1, "c1", event, "send-owned")
       if (settleHttp) {
         state = conversationReducer(state, {
-          type: "sendSucceeded",
+          type: "sendAccepted",
           conversationId: "c1",
           requestId: "send-owned",
         })
@@ -327,7 +327,7 @@ describe("live conversation reducer", () => {
     }
   )
 
-  it("moves accepted optimistic ownership to a new send without protecting the old transient", () => {
+  it("keeps a new accepted attempt independent from a prior terminal attempt", () => {
     let state = loadedState()
     state = conversationReducer(state, {
       type: "sendOptimistic",
@@ -343,7 +343,7 @@ describe("live conversation reducer", () => {
       "send-old"
     )
     state = conversationReducer(state, {
-      type: "sendSucceeded",
+      type: "sendAccepted",
       conversationId: "c1",
       requestId: "send-old",
     })
@@ -417,7 +417,7 @@ describe("live conversation reducer", () => {
       "send-before-reopen"
     )
     state = conversationReducer(state, {
-      type: "sendSucceeded",
+      type: "sendAccepted",
       conversationId: "c1",
       requestId: "send-before-reopen",
     })
@@ -627,10 +627,9 @@ describe("live conversation reducer", () => {
     expect(isAnyConversationRunning(state)).toBe(true)
 
     state = conversationReducer(state, {
-      type: "sendRejected",
+      type: "sendTransportRejected",
       conversationId: "c1",
       requestId: "send-1",
-      message: "发送失败",
     })
     expect(selectDisplayedTurns(state, "c1")).toEqual([])
     expect(state.summariesById.c1?.status).toBe("idle")
@@ -649,10 +648,9 @@ describe("live conversation reducer", () => {
       "send-2"
     )
     state = conversationReducer(state, {
-      type: "sendRejected",
+      type: "sendTransportRejected",
       conversationId: "c1",
       requestId: "send-2",
-      message: "响应丢失",
     })
     expect(selectDisplayedTurns(state, "c1").at(-1)?.text).toBe(
       "已被服务接受"
@@ -675,16 +673,15 @@ describe("live conversation reducer", () => {
       })
       state = receive(state, 1, "c1", event, "send-evidence")
       state = conversationReducer(state, {
-        type: "sendRejected",
+        type: "sendTransportRejected",
         conversationId: "c1",
         requestId: "send-evidence",
-        message: "raw transport failure",
       })
 
       expect(
         selectDisplayedTurns(state, "c1").map((turn) => turn.text)
       ).toEqual(["服务已接收"])
-      expect(state.liveByConversationId.c1?.pendingSend).toBeNull()
+      expect(state.liveByConversationId.c1?.httpSend).toBeNull()
       expect(state.liveByConversationId.c1?.sendError).toBe("发送失败，请重试。")
       expect(state.liveByConversationId.c1?.status).toBe("running")
       expect(state.summariesById.c1?.status).toBe("running")
@@ -725,16 +722,15 @@ describe("live conversation reducer", () => {
       })
       state = receive(state, 1, "c1", event, clientRequestId)
       state = conversationReducer(state, {
-        type: "sendRejected",
+        type: "sendTransportRejected",
         conversationId: "c1",
         requestId: "send-new",
-        message: "conflict",
       })
 
       expect(
         selectDisplayedTurns(state, "c1").map((turn) => turn.text)
       ).not.toContain("必须回滚的新请求")
-      expect(state.liveByConversationId.c1?.pendingSend).toBeNull()
+      expect(state.liveByConversationId.c1?.httpSend).toBeNull()
       expect(state.liveByConversationId.c1?.sendError).toBe("发送失败，请重试。")
       expect(state.liveByConversationId.c1?.status).toBe("running")
       expect(state.summariesById.c1?.status).toBe("running")
@@ -777,20 +773,26 @@ describe("live conversation reducer", () => {
       "send-terminal-first"
     )
 
-    expect(state.liveByConversationId.c1?.pendingSend).toMatchObject({
+    expect(state.liveByConversationId.c1?.httpSend).toMatchObject({
       requestId: "send-terminal-first",
-      acceptedByEvent: true,
     })
+    expect(state.liveByConversationId.c1?.sendAttempts).toContainEqual(
+      expect.objectContaining({
+        requestId: "send-terminal-first",
+        state: "accepted",
+        terminalObserved: true,
+      })
+    )
     expect(isConversationActive(state, "c1")).toBe(false)
     expect(isAnyConversationRunning(state)).toBe(true)
 
     state = conversationReducer(state, {
-      type: "sendSucceeded",
+      type: "sendAccepted",
       conversationId: "c1",
       requestId: "send-terminal-first",
     })
 
-    expect(state.liveByConversationId.c1?.pendingSend).toBeNull()
+    expect(state.liveByConversationId.c1?.httpSend).toBeNull()
     expect(state.liveByConversationId.c1?.draft).toBe("")
     expect(state.summariesById.c1?.status).toBe("idle")
   })
@@ -823,20 +825,414 @@ describe("live conversation reducer", () => {
       "send-rejected-late"
     )
     state = conversationReducer(state, {
-      type: "sendRejected",
+      type: "sendTransportRejected",
       conversationId: "c1",
       requestId: "send-rejected-late",
-      message: "raw transport failure",
     })
 
     expect(selectDisplayedTurns(state, "c1").map((turn) => turn.text)).toEqual([
       "已接受但响应失败",
     ])
-    expect(state.liveByConversationId.c1?.pendingSend).toBeNull()
+    expect(state.liveByConversationId.c1?.httpSend).toBeNull()
     expect(state.liveByConversationId.c1?.draft).toBe("已接受但响应失败")
     expect(state.liveByConversationId.c1?.sendError).toBe("发送失败，请重试。")
     expect(state.summariesById.c1?.status).toBe("idle")
     expect(isAnyConversationRunning(state)).toBe(false)
+  })
+
+  describe("send attempt ownership", () => {
+    it("treats HTTP 202 alone as acceptance that protects the optimistic user during reload", () => {
+      let state = loadedState()
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-http-only",
+        text: "HTTP 已接受的问题",
+      })
+      state = conversationReducer(state, {
+        type: "sendAccepted",
+        conversationId: "c1",
+        requestId: "send-http-only",
+      })
+      state = conversationReducer(state, {
+        type: "detailRequested",
+        conversationId: "c1",
+        requestId: 1,
+      })
+      state = conversationReducer(state, {
+        type: "detailSucceeded",
+        conversationId: "c1",
+        requestId: 1,
+        detail: { conversationId: "c1", turns: [] },
+      })
+
+      expect(
+        selectDisplayedTurns(state, "c1").map((turn) => turn.text)
+      ).toEqual(["HTTP 已接受的问题"])
+      expect(state.liveByConversationId.c1?.sendAttempts).toContainEqual(
+        expect.objectContaining({
+          requestId: "send-http-only",
+          state: "accepted",
+        })
+      )
+      expect(isAnyConversationRunning(state)).toBe(true)
+    })
+
+    it.each([
+      {
+        order: "HTTP then SSE",
+        evidence: "tool status",
+        event: tool("accepted-tool", "running"),
+      },
+      {
+        order: "HTTP then SSE",
+        evidence: "approval request",
+        event: approval("accepted-approval"),
+      },
+      {
+        order: "SSE then HTTP",
+        evidence: "tool status",
+        event: tool("accepted-tool", "running"),
+      },
+      {
+        order: "SSE then HTTP",
+        evidence: "approval request",
+        event: approval("accepted-approval"),
+      },
+    ])(
+      "protects a 202-accepted optimistic user across $order $evidence and a running detail reload",
+      ({ order, event }) => {
+        let state = loadedState()
+        state = conversationReducer(state, {
+          type: "sendOptimistic",
+          conversationId: "c1",
+          requestId: "send-owned",
+          text: "被接受的问题",
+        })
+
+        if (order === "HTTP then SSE") {
+          state = conversationReducer(state, {
+            type: "sendAccepted",
+            conversationId: "c1",
+            requestId: "send-owned",
+          })
+        }
+        state = receive(state, 1, "c1", event, "send-owned")
+        if (order === "SSE then HTTP") {
+          state = conversationReducer(state, {
+            type: "sendAccepted",
+            conversationId: "c1",
+            requestId: "send-owned",
+          })
+        }
+
+        state = conversationReducer(state, {
+          type: "detailRequested",
+          conversationId: "c1",
+          requestId: 1,
+        })
+        state = conversationReducer(state, {
+          type: "detailSucceeded",
+          conversationId: "c1",
+          requestId: 1,
+          detail: { conversationId: "c1", turns: [] },
+        })
+
+        expect(
+          selectDisplayedTurns(state, "c1").map((turn) => turn.text)
+        ).toEqual(["被接受的问题"])
+        expect(state.summariesById.c1?.status).toBe("running")
+        expect(isAnyConversationRunning(state)).toBe(true)
+      }
+    )
+
+    it("restores the same optimistic user when matching SSE arrives after a transport rejection", () => {
+      let state = loadedState()
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-uncertain",
+        text: "响应未知的问题",
+      })
+      state = conversationReducer(state, {
+        type: "sendTransportRejected",
+        conversationId: "c1",
+        requestId: "send-uncertain",
+      })
+
+      expect(selectDisplayedTurns(state, "c1")).toEqual([])
+      expect(isAnyConversationRunning(state)).toBe(false)
+
+      state = receive(
+        state,
+        1,
+        "c1",
+        tool("late-tool", "running"),
+        "send-uncertain"
+      )
+
+      expect(
+        selectDisplayedTurns(state, "c1").map((turn) => turn.text)
+      ).toEqual(["响应未知的问题"])
+      expect(state.liveByConversationId.c1?.sendError).toBeNull()
+      expect(isConversationActive(state, "c1")).toBe(true)
+    })
+
+    it("never lets an old late SSE envelope claim a newer send attempt", () => {
+      let state = loadedState()
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-old",
+        text: "旧问题",
+      })
+      state = conversationReducer(state, {
+        type: "sendTransportRejected",
+        conversationId: "c1",
+        requestId: "send-old",
+      })
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-new",
+        text: "新问题",
+      })
+
+      state = receive(
+        state,
+        1,
+        "c1",
+        approval("late-old-approval"),
+        "send-old"
+      )
+      expect(
+        selectDisplayedTurns(state, "c1").map((turn) => turn.text)
+      ).toEqual(["旧问题", "新问题"])
+      state = conversationReducer(state, {
+        type: "sendTransportRejected",
+        conversationId: "c1",
+        requestId: "send-new",
+      })
+
+      expect(
+        selectDisplayedTurns(state, "c1").map((turn) => turn.text)
+      ).toEqual(["旧问题"])
+      expect(state.liveByConversationId.c1?.sendError).toBe(
+        "发送失败，请重试。"
+      )
+      expect(isConversationActive(state, "c1")).toBe(true)
+    })
+
+    it("bounds rejected transport tombstones while retaining recent late-correlation evidence", () => {
+      let state = loadedState()
+      for (let index = 1; index <= 9; index += 1) {
+        state = conversationReducer(state, {
+          type: "sendOptimistic",
+          conversationId: "c1",
+          requestId: `send-${index}`,
+          text: `问题 ${index}`,
+        })
+        state = conversationReducer(state, {
+          type: "sendTransportRejected",
+          conversationId: "c1",
+          requestId: `send-${index}`,
+        })
+      }
+
+      state = receive(
+        state,
+        1,
+        "c1",
+        tool("too-old", "running"),
+        "send-1"
+      )
+      expect(selectDisplayedTurns(state, "c1")).toEqual([])
+
+      state = receive(
+        state,
+        2,
+        "c1",
+        tool("recent", "running"),
+        "send-9"
+      )
+      expect(
+        selectDisplayedTurns(state, "c1").map((turn) => turn.text)
+      ).toEqual(["问题 9"])
+    })
+
+    it("treats a 409 as definitive rejection without retaining a visible user or send lock", () => {
+      let state = loadedState()
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-conflict",
+        text: "冲突问题",
+      })
+      state = conversationReducer(state, {
+        type: "sendConflict",
+        conversationId: "c1",
+        requestId: "send-conflict",
+      })
+
+      expect(selectDisplayedTurns(state, "c1")).toEqual([])
+      expect(state.summariesById.c1?.status).toBe("idle")
+      expect(isAnyConversationRunning(state)).toBe(false)
+
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-after-conflict",
+        text: "冲突后的新问题",
+      })
+      expect(
+        selectDisplayedTurns(state, "c1").map((turn) => turn.text)
+      ).toEqual(["冲突后的新问题"])
+    })
+
+    it("retires a terminal attempt only after successful cross-ID history reconciliation", () => {
+      let state = loadedState()
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-terminal",
+        text: "终态问题",
+      })
+      state = conversationReducer(state, {
+        type: "sendAccepted",
+        conversationId: "c1",
+        requestId: "send-terminal",
+      })
+      state = receive(
+        state,
+        1,
+        "c1",
+        { type: "text_delta", turnId: "provider-turn", text: "终态回答" },
+        "send-terminal"
+      )
+      state = receive(
+        state,
+        2,
+        "c1",
+        { type: "turn_completed", turnId: "provider-turn" },
+        "send-terminal"
+      )
+      state = conversationReducer(state, {
+        type: "detailRequested",
+        conversationId: "c1",
+        requestId: 1,
+      })
+      state = conversationReducer(state, {
+        type: "detailFailed",
+        conversationId: "c1",
+        requestId: 1,
+        message: "历史同步失败",
+      })
+
+      expect(
+        selectDisplayedTurns(state, "c1").map((turn) => turn.text)
+      ).toEqual(["终态问题", "终态回答"])
+
+      state = conversationReducer(state, {
+        type: "detailRequested",
+        conversationId: "c1",
+        requestId: 2,
+      })
+      state = conversationReducer(state, {
+        type: "detailSucceeded",
+        conversationId: "c1",
+        requestId: 2,
+        detail: {
+          conversationId: "c1",
+          turns: [
+            {
+              id: "codex-user-item",
+              role: "user",
+              text: "终态问题",
+              status: "completed",
+            },
+            {
+              id: "codex-assistant-item",
+              role: "assistant",
+              text: "终态回答",
+              status: "completed",
+            },
+          ],
+        },
+      })
+      state = receive(
+        state,
+        3,
+        "c1",
+        tool("late-after-retirement", "running"),
+        "send-terminal"
+      )
+
+      expect(selectDisplayedTurns(state, "c1")).toEqual([
+        {
+          id: "codex-user-item",
+          role: "user",
+          text: "终态问题",
+          status: "completed",
+        },
+        {
+          id: "codex-assistant-item",
+          role: "assistant",
+          text: "终态回答",
+          status: "completed",
+        },
+      ])
+    })
+
+    it("drops pre-reconnect attempts and ignores their stale HTTP settlement and correlation", () => {
+      let state = loadedState()
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-before-reopen",
+        text: "重连前问题",
+      })
+      state = conversationReducer(state, {
+        type: "sendTransportRejected",
+        conversationId: "c1",
+        requestId: "send-before-reopen",
+      })
+      state = conversationReducer(state, { type: "streamReopened", epoch: 1 })
+      state = conversationReducer(state, {
+        type: "recoveryListSucceeded",
+        generation: 1,
+        workspace: "/work/taskmux",
+        conversations: [first, second],
+      })
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-after-reopen",
+        text: "重连后问题",
+      })
+
+      state = conversationReducer(state, {
+        type: "sendAccepted",
+        conversationId: "c1",
+        requestId: "send-before-reopen",
+      })
+      state = receive(
+        state,
+        1,
+        "c1",
+        {
+          type: "error",
+          code: "stale",
+          message: "stale",
+          terminal: false,
+        },
+        "send-before-reopen"
+      )
+
+      expect(
+        selectDisplayedTurns(state, "c1").map((turn) => turn.text)
+      ).toEqual(["重连后问题"])
+      expect(isAnyConversationRunning(state)).toBe(true)
+    })
   })
 })
 

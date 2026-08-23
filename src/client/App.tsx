@@ -110,7 +110,7 @@ function Workspace(): ReactNode {
           approvalError={live?.approvalError ?? null}
           liveError={live?.error ?? null}
           draft={live?.draft ?? ""}
-          sending={Boolean(live?.pendingSend)}
+          sending={Boolean(live?.httpSend)}
           cancelling={live?.cancelPending ?? false}
           sendError={live?.sendError ?? null}
           cancelError={live?.cancelError ?? null}

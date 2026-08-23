@@ -22,6 +22,8 @@ import type {
 import { TaskMuxApiError, type TaskMuxApi } from "./api.js"
 import { useEventStream } from "./use-event-stream.js"
 
+const MAX_SEND_ATTEMPT_TOMBSTONES = 8
+
 export type ConversationLoadingState = {
   list: boolean
   create: boolean
@@ -74,16 +76,25 @@ export type LiveConversationState = {
   cancelPending: boolean
   cancelRequestId: string | null
   cancelError: string | null
-  acceptedOptimisticTurnId: string | null
-  pendingSend: {
-    requestId: string
-    optimisticTurnId: string
-    submittedText: string
-    previousStatus: ConversationSummary["status"]
-    acceptedByEvent: boolean
-    turnActivityObserved: boolean
-  } | null
+  httpSend: HttpSendInFlight | null
+  sendAttempts: SendAttempt[]
   error: string | null
+}
+
+export type HttpSendInFlight = {
+  requestId: string
+  submittedText: string
+  epoch: number
+}
+
+export type SendAttempt = {
+  requestId: string
+  optimisticTurnId: string
+  submittedText: string
+  previousStatus: ConversationSummary["status"]
+  epoch: number
+  state: "optimistic" | "accepted" | "tombstone"
+  terminalObserved: boolean
 }
 
 export const initialConversationState: ConversationState = {
@@ -162,13 +173,13 @@ export type ConversationAction =
       text: string
     }
   | { type: "draftChanged"; conversationId: string; draft: string }
-  | { type: "sendSucceeded"; conversationId: string; requestId: string }
+  | { type: "sendAccepted"; conversationId: string; requestId: string }
   | {
-      type: "sendRejected"
+      type: "sendTransportRejected"
       conversationId: string
       requestId: string
-      message: string
     }
+  | { type: "sendConflict"; conversationId: string; requestId: string }
   | {
       type: "approvalResolved"
       conversationId: string
@@ -270,8 +281,8 @@ export function conversationReducer(
             toolOrder: [],
             approval: null,
             approvalError: null,
-            acceptedOptimisticTurnId: null,
-            pendingSend: null,
+            httpSend: null,
+            sendAttempts: [],
             cancelPending: false,
             cancelRequestId: null,
             cancelError: null,
@@ -406,10 +417,24 @@ export function conversationReducer(
     }
     case "sendOptimistic": {
       const live = liveFor(state, action.conversationId)
-      if (live.pendingSend || live.activeTurnId) return state
+      if (
+        live.httpSend ||
+        isConversationActive(state, action.conversationId)
+      ) {
+        return state
+      }
       const optimisticTurnId = `optimistic:${action.requestId}`
       const previousStatus =
         state.summariesById[action.conversationId]?.status ?? "idle"
+      const attempt: SendAttempt = {
+        requestId: action.requestId,
+        optimisticTurnId,
+        submittedText: action.text,
+        previousStatus,
+        epoch: state.streamEpoch,
+        state: "optimistic",
+        terminalObserved: false,
+      }
       return withLive(
         withSummaryStatus(state, action.conversationId, "running"),
         action.conversationId,
@@ -425,53 +450,133 @@ export function conversationReducer(
               status: "completed",
             },
           ],
-          pendingSend: {
+          httpSend: {
             requestId: action.requestId,
-            optimisticTurnId,
             submittedText: action.text,
-            previousStatus,
-            acceptedByEvent: false,
-            turnActivityObserved: false,
+            epoch: state.streamEpoch,
           },
-          acceptedOptimisticTurnId: null,
+          sendAttempts: appendSendAttempt(live.sendAttempts, attempt),
           sendError: null,
           error: null,
         }
       )
     }
-    case "sendSucceeded": {
+    case "sendAccepted": {
       const live = state.liveByConversationId[action.conversationId]
-      if (live?.pendingSend?.requestId !== action.requestId) return state
+      if (
+        !live ||
+        live.httpSend?.requestId !== action.requestId ||
+        live.httpSend.epoch !== state.streamEpoch
+      ) {
+        return state
+      }
       return withLive(state, action.conversationId, {
         ...live,
         draft:
-          live.draft === live.pendingSend.submittedText ? "" : live.draft,
-        pendingSend: null,
+          live.draft === live.httpSend.submittedText ? "" : live.draft,
+        httpSend: null,
+        sendAttempts: updateSendAttempt(
+          live.sendAttempts,
+          action.requestId,
+          state.streamEpoch,
+          (attempt) => ({ ...attempt, state: "accepted" })
+        ),
         sendError: null,
       })
     }
-    case "sendRejected": {
+    case "sendTransportRejected": {
       const live = state.liveByConversationId[action.conversationId]
-      const pending = live?.pendingSend
-      if (!live || !pending || pending.requestId !== action.requestId) return state
-      const accepted = pending.acceptedByEvent
-      const keepLiveState = accepted || pending.turnActivityObserved
+      const httpSend = live?.httpSend
+      if (
+        !live ||
+        !httpSend ||
+        httpSend.requestId !== action.requestId ||
+        httpSend.epoch !== state.streamEpoch
+      ) {
+        return state
+      }
+      const attempt = findSendAttempt(
+        live.sendAttempts,
+        action.requestId,
+        state.streamEpoch
+      )
+      if (!attempt) {
+        return withLive(state, action.conversationId, {
+          ...live,
+          httpSend: null,
+        })
+      }
+      const accepted = attempt.state === "accepted"
+      const keepLiveState = accepted || hasObservedLiveActivity(live)
       const nextLive: LiveConversationState = {
         ...live,
-        status: keepLiveState ? live.status : pending.previousStatus,
+        status: keepLiveState ? live.status : attempt.previousStatus,
         transientTurns: accepted
           ? live.transientTurns
           : live.transientTurns.filter(
-              (turn) => turn.id !== pending.optimisticTurnId
+              (turn) => turn.id !== attempt.optimisticTurnId
             ),
-        pendingSend: null,
+        httpSend: null,
+        sendAttempts: accepted
+          ? live.sendAttempts
+          : capSendAttemptTombstones(
+              updateSendAttempt(
+                live.sendAttempts,
+                action.requestId,
+                state.streamEpoch,
+                (current) => ({ ...current, state: "tombstone" })
+              )
+            ),
         sendError: "发送失败，请重试。",
         error: live.error,
       }
       const next = withLive(state, action.conversationId, nextLive)
       return keepLiveState
         ? next
-        : withSummaryStatus(next, action.conversationId, pending.previousStatus)
+        : withSummaryStatus(next, action.conversationId, attempt.previousStatus)
+    }
+    case "sendConflict": {
+      const live = state.liveByConversationId[action.conversationId]
+      const httpSend = live?.httpSend
+      if (
+        !live ||
+        !httpSend ||
+        httpSend.requestId !== action.requestId ||
+        httpSend.epoch !== state.streamEpoch
+      ) {
+        return state
+      }
+      const attempt = findSendAttempt(
+        live.sendAttempts,
+        action.requestId,
+        state.streamEpoch
+      )
+      const keepLiveState = hasObservedLiveActivity(live)
+      const next = withLive(state, action.conversationId, {
+        ...live,
+        status: keepLiveState
+          ? live.status
+          : (attempt?.previousStatus ?? "idle"),
+        transientTurns: attempt
+          ? live.transientTurns.filter(
+              (turn) => turn.id !== attempt.optimisticTurnId
+            )
+          : live.transientTurns,
+        httpSend: null,
+        sendAttempts: live.sendAttempts.filter(
+          (candidate) =>
+            candidate.requestId !== action.requestId ||
+            candidate.epoch !== state.streamEpoch
+        ),
+        sendError: "发送失败，请重试。",
+      })
+      return keepLiveState
+        ? next
+        : withSummaryStatus(
+            next,
+            action.conversationId,
+            attempt?.previousStatus ?? "idle"
+          )
     }
     case "approvalResolved": {
       const live = state.liveByConversationId[action.conversationId]
@@ -533,9 +638,10 @@ function reduceEvent(
   if (envelope.seq <= state.lastEventSeq) return state
   const stateWithSeq = { ...state, lastEventSeq: envelope.seq }
   const conversationId = envelope.conversationId
-  const live = observeEventForPendingSend(
+  const live = observeEventForSendAttempt(
     liveFor(stateWithSeq, conversationId),
-    envelope
+    envelope,
+    stateWithSeq.streamEpoch
   )
   const payload = envelope.payload
 
@@ -673,32 +779,127 @@ function reduceEvent(
   }
 }
 
-function observeEventForPendingSend(
+function observeEventForSendAttempt(
   live: LiveConversationState,
-  envelope: ConversationEventEnvelope
+  envelope: ConversationEventEnvelope,
+  epoch: number
 ): LiveConversationState {
-  if (!live.pendingSend) return live
-  const acceptedByThisEvent =
-    envelope.clientRequestId === live.pendingSend.requestId
+  if (!envelope.clientRequestId) return live
+  const attempt = findSendAttempt(
+    live.sendAttempts,
+    envelope.clientRequestId,
+    epoch
+  )
+  if (!attempt) return live
+  const restoredTurns = restoreOptimisticTurn(
+    live.transientTurns,
+    attempt,
+    live.sendAttempts
+  )
   return {
     ...live,
-    acceptedOptimisticTurnId: acceptedByThisEvent
-      ? live.pendingSend.optimisticTurnId
-      : live.acceptedOptimisticTurnId,
-    pendingSend: {
-      ...live.pendingSend,
-      acceptedByEvent:
-        live.pendingSend.acceptedByEvent ||
-        acceptedByThisEvent,
-      turnActivityObserved:
-        live.pendingSend.turnActivityObserved ||
-        isTurnActivity(envelope.payload),
-    },
+    transientTurns: restoredTurns,
+    sendAttempts: updateSendAttempt(
+      live.sendAttempts,
+      attempt.requestId,
+      epoch,
+      (current) => ({
+        ...current,
+        state: "accepted",
+        terminalObserved:
+          current.terminalObserved || isTerminalEvent(envelope.payload),
+      })
+    ),
+    sendError: attempt.state === "tombstone" ? null : live.sendError,
   }
 }
 
-function isTurnActivity(payload: ConversationEvent): boolean {
-  return payload.type !== "error" || payload.terminal
+function isTerminalEvent(payload: ConversationEvent): boolean {
+  return (
+    payload.type === "turn_completed" ||
+    payload.type === "turn_interrupted" ||
+    (payload.type === "error" && payload.terminal)
+  )
+}
+
+function appendSendAttempt(
+  attempts: SendAttempt[],
+  attempt: SendAttempt
+): SendAttempt[] {
+  return [
+    ...attempts.filter(
+      (candidate) =>
+        candidate.requestId !== attempt.requestId ||
+        candidate.epoch !== attempt.epoch
+    ),
+    attempt,
+  ]
+}
+
+function findSendAttempt(
+  attempts: SendAttempt[],
+  requestId: string,
+  epoch: number
+): SendAttempt | undefined {
+  return attempts.find(
+    (attempt) => attempt.requestId === requestId && attempt.epoch === epoch
+  )
+}
+
+function updateSendAttempt(
+  attempts: SendAttempt[],
+  requestId: string,
+  epoch: number,
+  update: (attempt: SendAttempt) => SendAttempt
+): SendAttempt[] {
+  return attempts.map((attempt) =>
+    attempt.requestId === requestId && attempt.epoch === epoch
+      ? update(attempt)
+      : attempt
+  )
+}
+
+function capSendAttemptTombstones(attempts: SendAttempt[]): SendAttempt[] {
+  const tombstones = attempts.filter((attempt) => attempt.state === "tombstone")
+  if (tombstones.length <= MAX_SEND_ATTEMPT_TOMBSTONES) return attempts
+  const retired = new Set(
+    tombstones.slice(0, tombstones.length - MAX_SEND_ATTEMPT_TOMBSTONES)
+  )
+  return attempts.filter((attempt) => !retired.has(attempt))
+}
+
+function restoreOptimisticTurn(
+  turns: MessageTurn[],
+  attempt: SendAttempt,
+  attempts: SendAttempt[]
+): MessageTurn[] {
+  if (turns.some((turn) => turn.id === attempt.optimisticTurnId)) return turns
+  const attemptIndex = attempts.indexOf(attempt)
+  const laterTurnIds = new Set(
+    attempts
+      .slice(attemptIndex + 1)
+      .map((candidate) => candidate.optimisticTurnId)
+  )
+  const insertionIndex = turns.findIndex((turn) => laterTurnIds.has(turn.id))
+  const restored: MessageTurn = {
+    id: attempt.optimisticTurnId,
+    role: "user",
+    text: attempt.submittedText,
+    status: "completed",
+  }
+  return insertionIndex === -1
+    ? [...turns, restored]
+    : [
+        ...turns.slice(0, insertionIndex),
+        restored,
+        ...turns.slice(insertionIndex),
+      ]
+}
+
+function hasObservedLiveActivity(live: LiveConversationState): boolean {
+  return Boolean(
+    live.activeTurnId || live.toolOrder.length > 0 || live.approval
+  )
 }
 
 function syncSelectedDetailAfterTerminal(
@@ -751,7 +952,6 @@ function terminalLive(
     toolOrder: [],
     approval: null,
     approvalError: null,
-    pendingSend: live.pendingSend,
     cancelPending: false,
     cancelRequestId: null,
     ...overrides,
@@ -773,8 +973,8 @@ function emptyLive(): LiveConversationState {
     cancelPending: false,
     cancelRequestId: null,
     cancelError: null,
-    acceptedOptimisticTurnId: null,
-    pendingSend: null,
+    httpSend: null,
+    sendAttempts: [],
     error: null,
   }
 }
@@ -834,10 +1034,9 @@ function retireTransientTurns(
   return withLive(state, conversationId, {
     ...live,
     transientTurns: live.transientTurns.filter((turn) => !retired.has(turn.id)),
-    acceptedOptimisticTurnId:
-      live.acceptedOptimisticTurnId && retired.has(live.acceptedOptimisticTurnId)
-        ? null
-        : live.acceptedOptimisticTurnId,
+    sendAttempts: live.sendAttempts.filter(
+      (attempt) => !retired.has(attempt.optimisticTurnId)
+    ),
   })
 }
 
@@ -845,14 +1044,17 @@ function retirableTransientIds(
   live: LiveConversationState | undefined
 ): string[] {
   if (!live) return []
-  const protectedId =
-    live.pendingSend && !live.pendingSend.acceptedByEvent
-      ? live.pendingSend.optimisticTurnId
-      : live.status === "running"
-        ? (live.acceptedOptimisticTurnId ?? undefined)
-        : undefined
+  const protectedIds = new Set(
+    live.sendAttempts
+      .filter(
+        (attempt) =>
+          attempt.state === "optimistic" ||
+          (attempt.state === "accepted" && !attempt.terminalObserved)
+      )
+      .map((attempt) => attempt.optimisticTurnId)
+  )
   return live.transientTurns
-    .filter((turn) => turn.id !== protectedId)
+    .filter((turn) => !protectedIds.has(turn.id))
     .map((turn) => turn.id)
 }
 
@@ -955,7 +1157,7 @@ export function isAnyConversationRunning(state: ConversationState): boolean {
   return state.order.some((id) => isConversationActive(state, id)) ||
     Object.entries(state.liveByConversationId).some(
       ([id, live]) =>
-        Boolean(live.pendingSend) ||
+        Boolean(live.httpSend) ||
         (!state.summariesById[id] && isConversationActive(state, id))
     )
 }
@@ -1008,7 +1210,7 @@ export function ConversationProvider({
   )
   const mounted = useRef(false)
   const createInFlight = useRef(false)
-  const sendInFlight = useRef<object | null>(null)
+  const sendInFlight = useRef<string | null>(null)
   const cancelInFlight = useRef(new Map<string, string>())
   const approvalInFlight = useRef(new Set<string>())
   const sendRequestId = useRef(0)
@@ -1158,9 +1360,8 @@ export function ConversationProvider({
       ) {
         return
       }
-      const ownership = {}
-      sendInFlight.current = ownership
       const requestId = `send-${++sendRequestId.current}`
+      sendInFlight.current = requestId
       dispatch({
         type: "sendOptimistic",
         conversationId,
@@ -1170,19 +1371,22 @@ export function ConversationProvider({
       try {
         await api.sendMessage(conversationId, text, requestId)
         if (mounted.current) {
-          dispatch({ type: "sendSucceeded", conversationId, requestId })
+          dispatch({ type: "sendAccepted", conversationId, requestId })
         }
       } catch (error) {
         if (mounted.current) {
-          dispatch({
-            type: "sendRejected",
-            conversationId,
-            requestId,
-            message: errorMessage(error),
-          })
+          dispatch(
+            error instanceof TaskMuxApiError && error.status === 409
+              ? { type: "sendConflict", conversationId, requestId }
+              : {
+                  type: "sendTransportRejected",
+                  conversationId,
+                  requestId,
+                }
+          )
         }
       } finally {
-        if (sendInFlight.current === ownership) {
+        if (sendInFlight.current === requestId) {
           sendInFlight.current = null
         }
       }
