@@ -105,6 +105,7 @@ export class ConversationService {
     try {
       this.#repository.setStatus(conversationId, "running")
       await this.#adapter.resumeSession(conversation.externalSessionId)
+      if (this.#activeTurns.get(conversationId) !== ownership) return
       await this.#adapter.sendText(conversation.externalSessionId, text)
     } catch (error) {
       this.#finishActiveTurn(conversationId, "failed", ownership)
@@ -222,7 +223,8 @@ export class ConversationService {
       this.#approvalOwners.set(event.payload.request.id, conversation.id)
     } else if (
       event.payload.type === "turn_started" &&
-      ownership?.externalSessionId === event.externalSessionId
+      ownership?.externalSessionId === event.externalSessionId &&
+      (ownership.turnId === undefined || ownership.turnId === event.payload.turnId)
     ) {
       ownership.turnId = event.payload.turnId
     } else if (
@@ -238,7 +240,7 @@ export class ConversationService {
     } else if (
       event.payload.type === "error" &&
       event.payload.terminal &&
-      ownership?.externalSessionId === event.externalSessionId
+      terminalErrorOwnsTurn(ownership, event.externalSessionId, event.payload)
     ) {
       this.#finishActiveTurn(conversation.id, "failed", ownership)
     }
@@ -311,6 +313,15 @@ function terminalEventOwnsTurn(
 ): ownership is ActiveTurn {
   return (
     ownership?.externalSessionId === externalSessionId &&
-    (ownership.turnId === undefined || ownership.turnId === turnId)
+    ownership.turnId === turnId
   )
+}
+
+function terminalErrorOwnsTurn(
+  ownership: ActiveTurn | undefined,
+  externalSessionId: string,
+  error: Extract<ConversationEvent, { type: "error"; terminal: true }>
+): ownership is ActiveTurn {
+  if (ownership?.externalSessionId !== externalSessionId) return false
+  return error.scope === "session" || ownership.turnId === error.turnId
 }

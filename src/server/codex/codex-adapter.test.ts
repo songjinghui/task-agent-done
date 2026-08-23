@@ -11,6 +11,20 @@ import type {
 type RequestCall = { method: string; params: unknown }
 type ResponseCall = { id: JsonRpcId; result: unknown }
 
+function deferred(): {
+  promise: Promise<void>
+  resolve: () => void
+  reject: (error: unknown) => void
+} {
+  let resolve!: () => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 class FakeCodexClient {
   readonly requests: RequestCall[] = []
   readonly responses: ResponseCall[] = []
@@ -249,6 +263,48 @@ describe("CodexAppServerAdapter", () => {
     ])
   })
 
+  it("does not let an old interrupt rejection clear a newer turn marker", async () => {
+    const { adapter, fake } = setup()
+    fake.enqueue("turn/start", { turn: { id: "turn_1" } })
+    await adapter.sendText("thr_1", "first")
+    const oldInterrupt = deferred()
+    fake.enqueue("turn/interrupt", oldInterrupt.promise)
+    const firstCancel = adapter.cancelTurn("thr_1")
+    await Promise.resolve()
+
+    fake.emit(
+      notification("turn/completed", {
+        threadId: "thr_1",
+        turn: { id: "turn_1", status: "interrupted", items: [] },
+      })
+    )
+    fake.enqueue("turn/start", { turn: { id: "turn_2" } })
+    await adapter.sendText("thr_1", "second")
+    const currentInterrupt = deferred()
+    fake.enqueue("turn/interrupt", currentInterrupt.promise)
+    fake.enqueue("turn/interrupt", currentInterrupt.promise)
+    const secondCancel = adapter.cancelTurn("thr_1")
+    await Promise.resolve()
+
+    oldInterrupt.reject(new Error("old interrupt failed"))
+    await expect(firstCancel).rejects.toThrow("old interrupt failed")
+    const duplicateCancel = adapter.cancelTurn("thr_1")
+    await Promise.resolve()
+    currentInterrupt.resolve()
+    await Promise.all([secondCancel, duplicateCancel])
+
+    expect(fake.requests.filter(({ method }) => method === "turn/interrupt")).toEqual([
+      {
+        method: "turn/interrupt",
+        params: { threadId: "thr_1", turnId: "turn_1" },
+      },
+      {
+        method: "turn/interrupt",
+        params: { threadId: "thr_1", turnId: "turn_2" },
+      },
+    ])
+  })
+
   it("normalizes failed and declined tools and terminal turn statuses", () => {
     const { events, fake } = setup()
 
@@ -340,12 +396,16 @@ describe("CodexAppServerAdapter", () => {
         code: "turn_failed",
         message: "Agent turn failed.",
         terminal: true,
+        scope: "turn",
+        turnId: "turn_failed",
       }),
       event("thr_unknown", {
         type: "error",
         code: "unsupported_turn_status",
         message: "Agent turn ended with an unsupported status.",
         terminal: true,
+        scope: "turn",
+        turnId: "turn_unknown",
       }),
     ])
   })
@@ -393,12 +453,14 @@ describe("CodexAppServerAdapter", () => {
         code: "app_server_exited",
         message: "Agent server exited unexpectedly.",
         terminal: true,
+        scope: "session",
       }),
       event("thr_2", {
         type: "error",
         code: "app_server_exited",
         message: "Agent server exited unexpectedly.",
         terminal: true,
+        scope: "session",
       }),
     ])
     expect(JSON.stringify(events)).not.toContain("private transport stderr")
@@ -453,6 +515,7 @@ describe("CodexAppServerAdapter", () => {
         code: "app_server_protocol_error",
         message: "Agent server protocol error.",
         terminal: true,
+        scope: "session",
       }),
     ])
     expect(JSON.stringify(events)).not.toContain("private malformed provider payload")

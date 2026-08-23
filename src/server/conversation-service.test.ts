@@ -249,12 +249,17 @@ describe("ConversationService", () => {
     await expect(service.sendText(second.id, "second")).rejects.toMatchObject({
       code: "turn_conflict",
     })
+    adapter.emit("session-1", { type: "turn_started", turnId: "t1" })
     adapter.emit("session-1", { type: "turn_completed", turnId: "t1" })
     await expect(service.sendText(second.id, "second")).resolves.toBeUndefined()
 
     expect(repository.getById(first.id)?.status).toBe("idle")
     expect(repository.getById(second.id)?.status).toBe("running")
     expect(eventSink.events).toEqual([
+      {
+        conversationId: first.id,
+        payload: { type: "turn_started", turnId: "t1" },
+      },
       {
         conversationId: first.id,
         payload: { type: "turn_completed", turnId: "t1" },
@@ -275,6 +280,7 @@ describe("ConversationService", () => {
         code: "app_server_exited",
         message: "exited",
         terminal: true,
+        scope: "session",
       } as const,
       "failed",
     ],
@@ -283,6 +289,7 @@ describe("ConversationService", () => {
     const first = await service.create()
     const second = await service.create()
     await service.sendText(first.id, "first")
+    adapter.emit("session-1", { type: "turn_started", turnId: "t1" })
 
     adapter.emit("session-1", payload)
 
@@ -306,11 +313,43 @@ describe("ConversationService", () => {
     await expect(service.sendText(second.id, "second")).resolves.toBeUndefined()
   })
 
+  it("does not start a provider turn after resume loses ownership", async () => {
+    const { adapter, repository, service } = createHarness()
+    const first = await service.create()
+    const second = await service.create()
+    const pendingResume = deferred()
+    adapter.onResumeSession = (externalSessionId) =>
+      externalSessionId === "session-1" ? pendingResume.promise : Promise.resolve()
+    const firstSend = service.sendText(first.id, "first")
+    await Promise.resolve()
+
+    adapter.emit("session-1", {
+      type: "error",
+      code: "app_server_exited",
+      message: "exited",
+      terminal: true,
+      scope: "session",
+    })
+    await service.sendText(second.id, "second")
+
+    pendingResume.resolve()
+    await firstSend
+
+    expect(adapter.sendTextCalls).toEqual([
+      { externalSessionId: "session-2", text: "second" },
+    ])
+    expect(repository.getById(second.id)?.status).toBe("running")
+    await expect(service.sendText(first.id, "third")).rejects.toMatchObject({
+      code: "turn_conflict",
+    })
+  })
+
   it("keeps ownership on non-terminal adapter errors", async () => {
     const { adapter, eventSink, repository, service } = createHarness()
     const first = await service.create()
     const second = await service.create()
     await service.sendText(first.id, "first")
+    adapter.emit("session-1", { type: "turn_started", turnId: "t1" })
 
     adapter.emit("session-1", {
       type: "error",
@@ -338,9 +377,53 @@ describe("ConversationService", () => {
       code: "turn_failed",
       message: "failed",
       terminal: true,
+      scope: "turn",
+      turnId: "t1",
     })
     expect(repository.getById(first.id)?.status).toBe("failed")
     await expect(service.sendText(second.id, "second")).resolves.toBeUndefined()
+  })
+
+  it("does not let an old turn-scoped failure release a newer turn", async () => {
+    const { adapter, repository, service } = createHarness()
+    const conversation = await service.create()
+    const other = await service.create()
+    await service.sendText(conversation.id, "first")
+    adapter.emit("session-1", { type: "turn_started", turnId: "old" })
+    adapter.emit("session-1", {
+      type: "error",
+      code: "turn_failed",
+      message: "old failed",
+      terminal: true,
+      scope: "turn",
+      turnId: "old",
+    })
+    await service.sendText(conversation.id, "second")
+    adapter.emit("session-1", { type: "turn_started", turnId: "current" })
+
+    adapter.emit("session-1", { type: "turn_started", turnId: "old" })
+    adapter.emit("session-1", {
+      type: "error",
+      code: "turn_failed",
+      message: "old failed again",
+      terminal: true,
+      scope: "turn",
+      turnId: "old",
+    })
+
+    expect(repository.getById(conversation.id)?.status).toBe("running")
+    await expect(service.sendText(other.id, "blocked")).rejects.toMatchObject({
+      code: "turn_conflict",
+    })
+    adapter.emit("session-1", {
+      type: "error",
+      code: "turn_failed",
+      message: "current failed",
+      terminal: true,
+      scope: "turn",
+      turnId: "current",
+    })
+    await expect(service.sendText(other.id, "allowed")).resolves.toBeUndefined()
   })
 
   it("marks a failed send and releases exactly that turn ownership", async () => {
@@ -390,6 +473,7 @@ describe("ConversationService", () => {
     expect(repository.getById(conversation.id)?.title).toBe(
       `${"a".repeat(59)}😀`
     )
+    adapter.emit("session-1", { type: "turn_started", turnId: "t1" })
     adapter.emit("session-1", { type: "turn_completed", turnId: "t1" })
     await service.sendText(conversation.id, "replacement title")
     expect(repository.getById(conversation.id)?.title).toBe(
@@ -454,6 +538,7 @@ describe("ConversationService", () => {
     const first = await service.create()
     const second = await service.create()
     await service.sendText(first.id, "first")
+    adapter.emit("session-1", { type: "turn_started", turnId: "t1" })
 
     await service.handleClientDisconnect()
     await service.handleClientDisconnect()
@@ -485,6 +570,7 @@ describe("ConversationService", () => {
     const first = await service.create()
     const second = await service.create()
     await service.sendText(first.id, "first")
+    adapter.emit("session-1", { type: "turn_started", turnId: "t1" })
     adapter.onCancelTurn = async () => {
       throw new Error("cancel failed")
     }
@@ -492,17 +578,15 @@ describe("ConversationService", () => {
     await expect(service.cancel(first.id)).rejects.toThrow("cancel failed")
 
     expect(repository.getById(first.id)?.status).toBe("running")
-    expect(eventSink.events).toEqual([
-      {
-        conversationId: first.id,
-        payload: {
-          type: "error",
-          code: "turn_cancel_failed",
-          message: "Failed to cancel the active turn.",
-          terminal: false,
-        },
+    expect(eventSink.events.at(-1)).toEqual({
+      conversationId: first.id,
+      payload: {
+        type: "error",
+        code: "turn_cancel_failed",
+        message: "Failed to cancel the active turn.",
+        terminal: false,
       },
-    ])
+    })
     await expect(service.sendText(second.id, "second")).rejects.toMatchObject({
       code: "turn_conflict",
     })
@@ -515,6 +599,7 @@ describe("ConversationService", () => {
     const { adapter, eventSink, service } = createHarness()
     const conversation = await service.create()
     await service.sendText(conversation.id, "first")
+    adapter.emit("session-1", { type: "turn_started", turnId: "t1" })
     const oldCancellation = deferred()
     adapter.onCancelTurn = () => oldCancellation.promise
     const firstCancel = service.cancel(conversation.id)
@@ -554,6 +639,7 @@ describe("ConversationService", () => {
       code: "app_server_exited",
       message: "exited",
       terminal: true,
+      scope: "session",
     })
 
     expect(eventSink.events).toEqual([])

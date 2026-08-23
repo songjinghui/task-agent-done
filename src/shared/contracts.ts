@@ -34,6 +34,24 @@ export type ApprovalRequest = {
 
 export type ApprovalDecision = "accept" | "decline"
 
+export type ConversationErrorEvent =
+  | { type: "error"; code: string; message: string; terminal: false }
+  | {
+      type: "error"
+      code: string
+      message: string
+      terminal: true
+      scope: "turn"
+      turnId: string
+    }
+  | {
+      type: "error"
+      code: string
+      message: string
+      terminal: true
+      scope: "session"
+    }
+
 export type ConversationEvent =
   | { type: "turn_started"; turnId: string }
   | { type: "text_delta"; turnId: string; text: string }
@@ -41,7 +59,7 @@ export type ConversationEvent =
   | { type: "approval_requested"; request: ApprovalRequest }
   | { type: "turn_completed"; turnId: string }
   | { type: "turn_interrupted"; turnId: string }
-  | { type: "error"; code: string; message: string; terminal: boolean }
+  | ConversationErrorEvent
 
 export type ConversationEventEnvelope = {
   conversationId: string

@@ -85,7 +85,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   readonly #listeners = new Set<(event: AgentAdapterEvent) => void>()
   readonly #pendingApprovals = new Map<string, PendingApproval>()
   readonly #activeTurns = new Map<string, string>()
-  readonly #interruptsRequested = new Set<string>()
+  readonly #interruptsRequested = new Map<string, string>()
   readonly #runningTools = new Map<string, Map<string, RunningTool>>()
   #nextApprovalId = 1
 
@@ -121,21 +121,27 @@ export class CodexAppServerAdapter implements AgentAdapter {
     })
     const turn = requireTurn(response)
     this.#activeTurns.set(externalSessionId, turn.id)
-    this.#interruptsRequested.delete(externalSessionId)
+    if (this.#interruptsRequested.get(externalSessionId) !== turn.id) {
+      this.#interruptsRequested.delete(externalSessionId)
+    }
   }
 
   async cancelTurn(externalSessionId: string): Promise<void> {
     const turnId = this.#activeTurns.get(externalSessionId)
-    if (!turnId || this.#interruptsRequested.has(externalSessionId)) return
+    if (!turnId || this.#interruptsRequested.get(externalSessionId) === turnId) {
+      return
+    }
 
-    this.#interruptsRequested.add(externalSessionId)
+    this.#interruptsRequested.set(externalSessionId, turnId)
     try {
       await this.#client.request("turn/interrupt", {
         threadId: externalSessionId,
         turnId,
       })
     } catch (error) {
-      this.#interruptsRequested.delete(externalSessionId)
+      if (this.#interruptsRequested.get(externalSessionId) === turnId) {
+        this.#interruptsRequested.delete(externalSessionId)
+      }
       throw error
     }
   }
@@ -196,7 +202,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
       const turnId = turn && stringField(turn, "id")
       if (turnId) {
         this.#activeTurns.set(threadId, turnId)
-        this.#interruptsRequested.delete(threadId)
+        if (this.#interruptsRequested.get(threadId) !== turnId) {
+          this.#interruptsRequested.delete(threadId)
+        }
         this.#emit(threadId, { type: "turn_started", turnId })
       }
       return
@@ -257,7 +265,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
     if (this.#activeTurns.get(threadId) === turnId) {
       this.#activeTurns.delete(threadId)
-      this.#interruptsRequested.delete(threadId)
+      if (this.#interruptsRequested.get(threadId) === turnId) {
+        this.#interruptsRequested.delete(threadId)
+      }
     }
 
     if (status === "interrupted") {
@@ -276,6 +286,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
           ? "Agent turn failed."
           : "Agent turn ended with an unsupported status.",
       terminal: true,
+      scope: "turn",
+      turnId,
     })
   }
 
@@ -292,6 +304,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         code,
         message,
         terminal: true,
+        scope: "session",
       })
     }
   }
