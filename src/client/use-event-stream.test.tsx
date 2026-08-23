@@ -11,6 +11,7 @@ import {
   conversationReducer,
   initialConversationState,
   isAnyConversationRunning,
+  isConversationActive,
   selectApproval,
   selectDisplayedTurns,
   selectLiveText,
@@ -145,6 +146,22 @@ describe("live conversation reducer", () => {
     expect(selectDisplayedTurns(state, "c1")).toHaveLength(1)
   })
 
+  it("requests selected terminal history sync only for the active lifecycle", () => {
+    let state = loadedState()
+    state = receive(state, 1, "c1", { type: "turn_started", turnId: "t1" })
+    state = receive(state, 2, "c1", { type: "turn_completed", turnId: "t1" })
+    expect(state.detailLoadGeneration).toBe(1)
+
+    state = receive(state, 3, "c1", {
+      type: "error",
+      code: "late_session_error",
+      message: "late",
+      terminal: true,
+      scope: "session",
+    })
+    expect(state.detailLoadGeneration).toBe(1)
+  })
+
   it("retires transient user and assistant turns after refreshed history uses different item IDs", () => {
     let state = loadedState()
     state = conversationReducer(state, {
@@ -248,6 +265,7 @@ describe("live conversation reducer", () => {
     state = conversationReducer(state, {
       type: "recoveryListSucceeded",
       generation: 1,
+      workspace: "/work/taskmux",
       conversations: [{ ...second, status: "running" }],
     })
     expect(state.summariesById.c2?.status).toBe("interrupted")
@@ -260,6 +278,7 @@ describe("live conversation reducer", () => {
     state = conversationReducer(state, {
       type: "recoveryListSucceeded",
       generation: 1,
+      workspace: "/stale/workspace",
       conversations: [{ ...second, status: "running" }],
     })
 
@@ -267,6 +286,45 @@ describe("live conversation reducer", () => {
     expect(state.order).toEqual(["c1", "c2"])
     expect(state.summariesById.c2?.status).toBe("idle")
     expect(state.recovering).toBe(true)
+  })
+
+  it("clears only the error scope owned by each successful request", () => {
+    let state: ConversationState = {
+      ...loadedState(),
+      recoveryGeneration: 1,
+      errors: {
+        bootstrap: null,
+        list: "列表错误",
+        detail: { conversationId: "c1", message: "历史错误" },
+        create: "新建错误",
+        recovery: "恢复错误",
+      },
+    }
+    state = conversationReducer(state, {
+      type: "recoveryListSucceeded",
+      generation: 1,
+      workspace: "/recovered",
+      conversations: [first, second],
+    })
+
+    expect(state.errors).toEqual({
+      bootstrap: null,
+      list: "列表错误",
+      detail: { conversationId: "c1", message: "历史错误" },
+      create: "新建错误",
+      recovery: null,
+    })
+
+    state = conversationReducer(state, {
+      type: "createSucceeded",
+      conversation: { ...first, id: "new" },
+    })
+    expect(state.errors.create).toBeNull()
+    expect(state.errors.detail).toEqual({
+      conversationId: "c1",
+      message: "历史错误",
+    })
+    expect(state.errors.list).toBe("列表错误")
   })
 
   it("ignores cancellation settlement from a retired stream request", () => {
@@ -385,6 +443,89 @@ describe("live conversation reducer", () => {
       "已被服务接受"
     )
     expect(isAnyConversationRunning(state)).toBe(true)
+  })
+
+  it("settles an HTTP success after SSE completed the turn first", () => {
+    let state = loadedState()
+    state = conversationReducer(state, {
+      type: "draftChanged",
+      conversationId: "c1",
+      draft: "先终态后 HTTP",
+    })
+    state = conversationReducer(state, {
+      type: "sendOptimistic",
+      conversationId: "c1",
+      requestId: "send-terminal-first",
+      text: "先终态后 HTTP",
+    })
+    state = receive(state, 1, "c1", {
+      type: "turn_started",
+      turnId: "terminal-first",
+    })
+    state = receive(state, 2, "c1", {
+      type: "text_delta",
+      turnId: "terminal-first",
+      text: "完成",
+    })
+    state = receive(state, 3, "c1", {
+      type: "turn_completed",
+      turnId: "terminal-first",
+    })
+
+    expect(state.liveByConversationId.c1?.pendingSend).toMatchObject({
+      requestId: "send-terminal-first",
+      acceptedByEvent: true,
+    })
+    expect(isConversationActive(state, "c1")).toBe(false)
+    expect(isAnyConversationRunning(state)).toBe(true)
+
+    state = conversationReducer(state, {
+      type: "sendSucceeded",
+      conversationId: "c1",
+      requestId: "send-terminal-first",
+    })
+
+    expect(state.liveByConversationId.c1?.pendingSend).toBeNull()
+    expect(state.liveByConversationId.c1?.draft).toBe("")
+    expect(state.summariesById.c1?.status).toBe("idle")
+  })
+
+  it("settles an HTTP rejection after SSE terminal without rolling back accepted content", () => {
+    let state = loadedState()
+    state = conversationReducer(state, {
+      type: "draftChanged",
+      conversationId: "c1",
+      draft: "已接受但响应失败",
+    })
+    state = conversationReducer(state, {
+      type: "sendOptimistic",
+      conversationId: "c1",
+      requestId: "send-rejected-late",
+      text: "已接受但响应失败",
+    })
+    state = receive(state, 1, "c1", {
+      type: "turn_started",
+      turnId: "accepted-turn",
+    })
+    state = receive(state, 2, "c1", {
+      type: "turn_completed",
+      turnId: "accepted-turn",
+    })
+    state = conversationReducer(state, {
+      type: "sendRejected",
+      conversationId: "c1",
+      requestId: "send-rejected-late",
+      message: "raw transport failure",
+    })
+
+    expect(selectDisplayedTurns(state, "c1").map((turn) => turn.text)).toEqual([
+      "已接受但响应失败",
+    ])
+    expect(state.liveByConversationId.c1?.pendingSend).toBeNull()
+    expect(state.liveByConversationId.c1?.draft).toBe("已接受但响应失败")
+    expect(state.liveByConversationId.c1?.sendError).toBe("发送失败，请重试。")
+    expect(state.summariesById.c1?.status).toBe("idle")
+    expect(isAnyConversationRunning(state)).toBe(false)
   })
 })
 

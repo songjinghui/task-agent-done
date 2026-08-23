@@ -210,6 +210,44 @@ describe("App", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument()
   })
 
+  it("keeps the selected detail error and retry visible when recovery list succeeds", async () => {
+    installEventSource()
+    const recoveryDetail = deferred<ConversationDetail>()
+    let detailCalls = 0
+    let listCalls = 0
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => {
+            listCalls += 1
+            return [first]
+          },
+          getConversation: async () => {
+            detailCalls += 1
+            if (detailCalls === 1) throw new Error("历史独立失败")
+            return recoveryDetail.promise
+          },
+        })}
+      />
+    )
+    expect(await screen.findByRole("alert")).toHaveTextContent("历史独立失败")
+    const source = FakeEventSource.instances[0]!
+    act(() => {
+      source.open()
+      source.fail()
+      source.open()
+    })
+
+    await waitFor(() => expect(listCalls).toBe(2))
+    expect(detailCalls).toBe(2)
+    expect(screen.getByRole("alert")).toHaveTextContent("历史独立失败")
+    expect(screen.getByRole("button", { name: "重试" })).toBeVisible()
+
+    recoveryDetail.resolve(detail(first.id, []))
+    await act(async () => void (await recoveryDetail.promise))
+    expect(screen.queryByText("历史独立失败")).not.toBeInTheDocument()
+  })
+
   it("ignores a late retry result after switching conversations", async () => {
     const retry = deferred<ConversationDetail>()
     let firstAttempts = 0
@@ -467,6 +505,96 @@ describe("App", () => {
     expect(FakeEventSource.instances).toHaveLength(1)
   })
 
+  it("finishes bootstrap from recovery workspace and list when reopen cancels the first load", async () => {
+    installEventSource()
+    const firstWorkspace = deferred<{ workspace: string }>()
+    const firstList = deferred<ConversationSummary[]>()
+    let workspaceCalls = 0
+    let listCalls = 0
+    render(
+      <App
+        api={fakeApi({
+          getWorkspace: () => {
+            workspaceCalls += 1
+            return workspaceCalls === 1
+              ? firstWorkspace.promise
+              : Promise.resolve({ workspace: "/recovered/workspace" })
+          },
+          listConversations: () => {
+            listCalls += 1
+            return listCalls === 1
+              ? firstList.promise
+              : Promise.resolve([first])
+          },
+        })}
+      />
+    )
+    const source = FakeEventSource.instances[0]!
+    act(() => {
+      source.open()
+      source.fail()
+      source.open()
+    })
+
+    expect(await screen.findByText("/recovered/workspace")).toBeVisible()
+    expect(screen.getByRole("button", { name: /修复 README 测试/ })).toBeVisible()
+    expect(screen.queryByText("正在加载会话…")).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "新建会话" })).toBeEnabled()
+    expect(workspaceCalls).toBe(2)
+    expect(listCalls).toBe(2)
+
+    firstWorkspace.resolve({ workspace: "/stale/workspace" })
+    firstList.resolve([])
+    await act(async () => {
+      await firstWorkspace.promise
+      await firstList.promise
+    })
+    expect(screen.getByText("/recovered/workspace")).toBeVisible()
+    expect(screen.getByRole("button", { name: /修复 README 测试/ })).toBeVisible()
+  })
+
+  it("keeps a pre-reconnect create result while recovery is pending and merges the stale snapshot", async () => {
+    installEventSource()
+    const create = deferred<ConversationSummary>()
+    const recoveryList = deferred<ConversationSummary[]>()
+    let listCalls = 0
+    const created = { ...first, id: "local-new", title: "重连前新建" }
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: () => {
+            listCalls += 1
+            return listCalls === 1 ? Promise.resolve([]) : recoveryList.promise
+          },
+          createConversation: () => create.promise,
+          getConversation: async (id) => detail(id, []),
+        })}
+      />
+    )
+    await screen.findByText("还没有会话")
+    await user.click(screen.getByRole("button", { name: "新建会话" }))
+    const source = FakeEventSource.instances[0]!
+    act(() => {
+      source.open()
+      source.fail()
+      source.open()
+    })
+    await waitFor(() => expect(listCalls).toBe(2))
+
+    create.resolve(created)
+    expect(
+      await screen.findByRole("button", { name: /重连前新建/ })
+    ).toHaveAttribute("aria-current", "page")
+    expect(screen.getByRole("button", { name: "新建会话" })).toBeDisabled()
+
+    recoveryList.resolve([{ ...created, title: "过期的新建快照" }])
+    await act(async () => void (await recoveryList.promise))
+    expect(screen.getByRole("button", { name: /重连前新建/ })).toBeVisible()
+    expect(screen.queryByText("过期的新建快照")).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "新建会话" })).toBeEnabled()
+  })
+
   it("keeps drafts and send settlement scoped to their conversation", async () => {
     const idleSecond = { ...second, status: "idle" as const }
     const accepted = deferred<{ accepted: true }>()
@@ -624,6 +752,129 @@ describe("App", () => {
     expect(screen.getAllByText("恢复回答")).toHaveLength(1)
     expect(screen.queryByRole("button", { name: "取消" })).not.toBeInTheDocument()
     expect(FakeEventSource.instances).toHaveLength(1)
+  })
+
+  it("supersedes pre-terminal detail and syncs selected completed history without cross-ID duplicates", async () => {
+    installEventSource()
+    const preTerminalDetail = deferred<ConversationDetail>()
+    const sendResponse = deferred<{ accepted: true }>()
+    let detailCalls = 0
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [first],
+          getConversation: async () => {
+            detailCalls += 1
+            if (detailCalls === 1) return preTerminalDetail.promise
+            return detail(first.id, [
+              turn("codex-user", "user", "同步问题"),
+              turn("codex-assistant", "assistant", "同步回答"),
+            ])
+          },
+          sendMessage: () => sendResponse.promise,
+        })}
+      />
+    )
+    await screen.findByRole("button", { name: /修复 README 测试/ })
+    await user.type(screen.getByRole("textbox", { name: "消息" }), "同步问题{enter}")
+    const source = FakeEventSource.instances[0]!
+    act(() => {
+      source.open()
+      source.event(1, first.id, { type: "turn_started", turnId: "live-turn" })
+      source.event(2, first.id, {
+        type: "text_delta",
+        turnId: "live-turn",
+        text: "同步回答",
+      })
+      source.event(3, first.id, {
+        type: "turn_completed",
+        turnId: "live-turn",
+      })
+    })
+
+    await waitFor(() => expect(detailCalls).toBe(2))
+    expect(
+      screen.getAllByText("同步问题", { selector: ".message-text" })
+    ).toHaveLength(1)
+    expect(
+      screen.getAllByText("同步回答", { selector: ".message-text" })
+    ).toHaveLength(1)
+    expect(
+      screen.queryByRole("button", { name: "取消" })
+    ).not.toBeInTheDocument()
+
+    preTerminalDetail.resolve(
+      detail(first.id, [turn("stale", "assistant", "终态前旧历史")])
+    )
+    await act(async () => void (await preTerminalDetail.promise))
+    expect(screen.queryByText("终态前旧历史")).not.toBeInTheDocument()
+    expect(
+      screen.getAllByText("同步问题", { selector: ".message-text" })
+    ).toHaveLength(1)
+    expect(
+      screen.getAllByText("同步回答", { selector: ".message-text" })
+    ).toHaveLength(1)
+
+    sendResponse.resolve({ accepted: true })
+    await act(async () => void (await sendResponse.promise))
+    expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue("")
+  })
+
+  it("keeps terminal transients when detail sync fails and retires them after retry", async () => {
+    installEventSource()
+    let detailCalls = 0
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [first],
+          getConversation: async () => {
+            detailCalls += 1
+            if (detailCalls === 1) return detail(first.id, [])
+            if (detailCalls === 2) throw new Error("终态历史同步失败")
+            return detail(first.id, [
+              turn("retry-user", "user", "保留问题"),
+              turn("retry-assistant", "assistant", "保留回答"),
+            ])
+          },
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    await user.type(screen.getByRole("textbox", { name: "消息" }), "保留问题{enter}")
+    const source = FakeEventSource.instances[0]!
+    act(() => {
+      source.open()
+      source.event(1, first.id, { type: "turn_started", turnId: "retry-turn" })
+      source.event(2, first.id, {
+        type: "text_delta",
+        turnId: "retry-turn",
+        text: "保留回答",
+      })
+      source.event(3, first.id, {
+        type: "turn_completed",
+        turnId: "retry-turn",
+      })
+    })
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("终态历史同步失败")
+    expect(
+      screen.getAllByText("保留问题", { selector: ".message-text" })
+    ).toHaveLength(1)
+    expect(
+      screen.getAllByText("保留回答", { selector: ".message-text" })
+    ).toHaveLength(1)
+
+    await user.click(screen.getByRole("button", { name: "重试" }))
+    await waitFor(() => expect(detailCalls).toBe(3))
+    expect(screen.queryByText("终态历史同步失败")).not.toBeInTheDocument()
+    expect(
+      screen.getAllByText("保留问题", { selector: ".message-text" })
+    ).toHaveLength(1)
+    expect(
+      screen.getAllByText("保留回答", { selector: ".message-text" })
+    ).toHaveLength(1)
   })
 
   it("ignores stale recovery detail after selection changes and refreshes unselected status", async () => {

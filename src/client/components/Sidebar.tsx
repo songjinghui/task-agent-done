@@ -10,6 +10,7 @@ export function Sidebar({
   selectedId,
   loading,
   creating,
+  createDisabled = false,
   onCreate,
   onSelect,
 }: {
@@ -18,6 +19,7 @@ export function Sidebar({
   selectedId: string | null
   loading: boolean
   creating: boolean
+  createDisabled?: boolean
   onCreate(): void
   onSelect(conversationId: string): void
 }): ReactNode {
@@ -38,7 +40,7 @@ export function Sidebar({
       <button
         className="new-conversation"
         type="button"
-        disabled={loading || creating}
+        disabled={loading || creating || createDisabled}
         aria-busy={creating}
         onClick={onCreate}
       >

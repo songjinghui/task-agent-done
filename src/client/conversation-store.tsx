@@ -27,15 +27,23 @@ export type ConversationLoadingState = {
   detail: boolean
 }
 
+export type ConversationErrors = {
+  bootstrap: string | null
+  list: string | null
+  detail: { conversationId: string; message: string } | null
+  create: string | null
+  recovery: string | null
+}
+
 export type ConversationState = {
   workspace: string | null
   summariesById: Record<string, ConversationSummary>
   order: string[]
+  locallyCreatedIds: string[]
   selectedId: string | null
   detailsById: Record<string, ConversationDetail>
   loading: ConversationLoadingState
-  error: string | null
-  errorScope: "list" | "create" | "detail" | null
+  errors: ConversationErrors
   detailRequest: {
     conversationId: string
     requestId: number
@@ -78,11 +86,17 @@ export const initialConversationState: ConversationState = {
   workspace: null,
   summariesById: {},
   order: [],
+  locallyCreatedIds: [],
   selectedId: null,
   detailsById: {},
   loading: { list: true, create: false, detail: false },
-  error: null,
-  errorScope: null,
+  errors: {
+    bootstrap: null,
+    list: null,
+    detail: null,
+    create: null,
+    recovery: null,
+  },
   detailRequest: null,
   detailLoadGeneration: 0,
   lastEventSeq: 0,
@@ -100,10 +114,16 @@ export type ConversationAction =
       conversations: ConversationSummary[]
       generation?: number
     }
-  | { type: "listFailed"; message: string; generation?: number }
+  | {
+      type: "listFailed"
+      message: string
+      scope: "bootstrap" | "list" | "recovery"
+      generation?: number
+    }
   | {
       type: "recoveryListSucceeded"
       generation: number
+      workspace: string
       conversations: ConversationSummary[]
     }
   | { type: "streamReopened"; epoch: number }
@@ -180,8 +200,7 @@ export function conversationReducer(
         order,
         selectedId: order[0] ?? null,
         loading: { ...state.loading, list: false },
-        error: null,
-        errorScope: null,
+        errors: { ...state.errors, bootstrap: null, list: null },
       }
     }
     case "listFailed":
@@ -195,25 +214,33 @@ export function conversationReducer(
         ...state,
         loading: { ...state.loading, list: false },
         recovering: false,
-        error: action.message,
-        errorScope: "list",
+        errors: { ...state.errors, [action.scope]: action.message },
       }
     case "recoveryListSucceeded": {
       if (action.generation !== state.recoveryGeneration) return state
-      const summariesById = mergeLiveStatuses(state, action.conversations)
-      const order = action.conversations.map((conversation) => conversation.id)
+      const { summariesById, order } = mergeRecoverySummaries(
+        state,
+        action.conversations
+      )
       const selectedId =
         state.selectedId && summariesById[state.selectedId]
           ? state.selectedId
           : (order[0] ?? null)
       return {
         ...state,
+        workspace: action.workspace,
         summariesById,
         order,
+        locallyCreatedIds: state.locallyCreatedIds.filter(
+          (id) =>
+            !action.conversations.some(
+              (conversation) => conversation.id === id
+            )
+        ),
         selectedId,
+        loading: { ...state.loading, list: false },
         recovering: false,
-        error: null,
-        errorScope: null,
+        errors: { ...state.errors, recovery: null },
       }
     }
     case "streamReopened": {
@@ -255,14 +282,19 @@ export function conversationReducer(
         recovering: true,
         detailRequest: null,
         detailLoadGeneration: state.detailLoadGeneration + 1,
+        errors: {
+          ...state.errors,
+          bootstrap: null,
+          list: null,
+          recovery: null,
+        },
       }
     }
     case "createStarted":
       return {
         ...state,
         loading: { ...state.loading, create: true },
-        error: null,
-        errorScope: null,
+        errors: { ...state.errors, create: null },
       }
     case "createSucceeded":
       return {
@@ -275,17 +307,21 @@ export function conversationReducer(
           action.conversation.id,
           ...state.order.filter((id) => id !== action.conversation.id),
         ],
+        locallyCreatedIds: [
+          action.conversation.id,
+          ...state.locallyCreatedIds.filter(
+            (id) => id !== action.conversation.id
+          ),
+        ],
         selectedId: action.conversation.id,
         loading: { ...state.loading, create: false },
-        error: null,
-        errorScope: null,
+        errors: { ...state.errors, create: null },
       }
     case "createFailed":
       return {
         ...state,
         loading: { ...state.loading, create: false },
-        error: action.message,
-        errorScope: "create",
+        errors: { ...state.errors, create: action.message },
       }
     case "selected":
       if (!state.summariesById[action.conversationId]) return state
@@ -293,13 +329,11 @@ export function conversationReducer(
       return {
         ...state,
         selectedId: action.conversationId,
-        error: null,
-        errorScope: null,
       }
     case "retrySelectedDetail":
       if (
         !state.selectedId ||
-        state.errorScope !== "detail" ||
+        state.errors.detail?.conversationId !== state.selectedId ||
         state.loading.detail
       ) {
         return state
@@ -307,8 +341,7 @@ export function conversationReducer(
       return {
         ...state,
         loading: { ...state.loading, detail: true },
-        error: null,
-        errorScope: null,
+        errors: { ...state.errors, detail: null },
         detailLoadGeneration: state.detailLoadGeneration + 1,
       }
     case "detailRequested":
@@ -323,8 +356,6 @@ export function conversationReducer(
             state.liveByConversationId[action.conversationId]
           ),
         },
-        error: null,
-        errorScope: null,
       }
     case "detailSucceeded":
       if (!isCurrentDetailRequest(state, action)) return state
@@ -336,8 +367,7 @@ export function conversationReducer(
         },
         loading: { ...state.loading, detail: false },
         detailRequest: null,
-        error: null,
-        errorScope: null,
+        errors: { ...state.errors, detail: null },
       }, action.conversationId, state.detailRequest!.transientTurnIds)
     case "detailFailed":
       if (!isCurrentDetailRequest(state, action)) return state
@@ -345,8 +375,13 @@ export function conversationReducer(
         ...state,
         loading: { ...state.loading, detail: false },
         detailRequest: null,
-        error: action.message,
-        errorScope: "detail",
+        errors: {
+          ...state.errors,
+          detail: {
+            conversationId: action.conversationId,
+            message: action.message,
+          },
+        },
       }
     case "streamStatusChanged":
       return state.streamStatus === action.status
@@ -413,7 +448,7 @@ export function conversationReducer(
       const accepted = pending.acceptedByEvent || live.activeTurnId !== null
       const nextLive: LiveConversationState = {
         ...live,
-        status: accepted ? "running" : pending.previousStatus,
+        status: accepted ? live.status : pending.previousStatus,
         transientTurns: accepted
           ? live.transientTurns
           : live.transientTurns.filter(
@@ -569,20 +604,28 @@ function reduceEvent(
                 },
               ]
           : live.transientTurns
-      return withLive(
-        withSummaryStatus(stateWithSeq, conversationId, "idle"),
+      return syncSelectedDetailAfterTerminal(
+        withLive(
+          withSummaryStatus(stateWithSeq, conversationId, "idle"),
+          conversationId,
+          terminalLive(live, { status: "idle", transientTurns })
+        ),
         conversationId,
-        terminalLive(live, { status: "idle", transientTurns })
+        isTerminalLifecycleActive(stateWithSeq, live, conversationId)
       )
     }
     case "turn_interrupted":
       if (live.activeTurnId && live.activeTurnId !== payload.turnId) {
         return stateWithSeq
       }
-      return withLive(
-        withSummaryStatus(stateWithSeq, conversationId, "interrupted"),
+      return syncSelectedDetailAfterTerminal(
+        withLive(
+          withSummaryStatus(stateWithSeq, conversationId, "interrupted"),
+          conversationId,
+          terminalLive(live, { status: "interrupted" })
+        ),
         conversationId,
-        terminalLive(live, { status: "interrupted" })
+        isTerminalLifecycleActive(stateWithSeq, live, conversationId)
       )
     case "error": {
       if (!payload.terminal) {
@@ -600,13 +643,42 @@ function reduceEvent(
       ) {
         return stateWithSeq
       }
-      return withLive(
-        withSummaryStatus(stateWithSeq, conversationId, "failed"),
+      return syncSelectedDetailAfterTerminal(
+        withLive(
+          withSummaryStatus(stateWithSeq, conversationId, "failed"),
+          conversationId,
+          terminalLive(live, { status: "failed", error: payload.message })
+        ),
         conversationId,
-        terminalLive(live, { status: "failed", error: payload.message })
+        isTerminalLifecycleActive(stateWithSeq, live, conversationId)
       )
     }
   }
+}
+
+function syncSelectedDetailAfterTerminal(
+  state: ConversationState,
+  conversationId: string,
+  terminalWasActive: boolean
+): ConversationState {
+  if (!terminalWasActive || state.selectedId !== conversationId) return state
+  return {
+    ...state,
+    detailRequest: null,
+    detailLoadGeneration: state.detailLoadGeneration + 1,
+    loading: { ...state.loading, detail: true },
+  }
+}
+
+function isTerminalLifecycleActive(
+  state: ConversationState,
+  live: LiveConversationState,
+  conversationId: string
+): boolean {
+  return Boolean(
+    live.activeTurnId ||
+      state.summariesById[conversationId]?.status === "running"
+  )
 }
 
 function terminalLive(
@@ -620,7 +692,9 @@ function terminalLive(
     toolOrder: [],
     approval: null,
     approvalError: null,
-    pendingSend: null,
+    pendingSend: live.pendingSend
+      ? { ...live.pendingSend, acceptedByEvent: true }
+      : null,
     cancelPending: false,
     cancelRequestId: null,
     ...overrides,
@@ -662,6 +736,35 @@ function mergeLiveStatuses(
   )
 }
 
+function mergeRecoverySummaries(
+  state: ConversationState,
+  conversations: ConversationSummary[]
+): Pick<ConversationState, "summariesById" | "order"> {
+  const recovered = mergeLiveStatuses(state, conversations)
+  const locallyCreated = new Set(state.locallyCreatedIds)
+  const retainedIds = state.order.filter(
+    (id) => !recovered[id] || locallyCreated.has(id)
+  )
+  const summariesById = {
+    ...recovered,
+    ...Object.fromEntries(
+      retainedIds.flatMap((id) => {
+        const summary = state.summariesById[id]
+        return summary ? [[id, summary]] : []
+      })
+    ),
+  }
+  return {
+    summariesById,
+    order: [
+      ...retainedIds,
+      ...conversations
+        .map((conversation) => conversation.id)
+        .filter((id) => !retainedIds.includes(id)),
+    ],
+  }
+}
+
 function retireTransientTurns(
   state: ConversationState,
   conversationId: string,
@@ -681,12 +784,13 @@ function retirableTransientIds(
 ): string[] {
   if (!live) return []
   const protectedId =
-    live.pendingSend?.optimisticTurnId ??
-    (live.activeTurnId
+    live.pendingSend && !live.pendingSend.acceptedByEvent
+      ? live.pendingSend.optimisticTurnId
+      : live.activeTurnId
       ? [...live.transientTurns]
           .reverse()
           .find((turn) => turn.role === "user")?.id
-      : undefined)
+      : undefined
   return live.transientTurns
     .filter((turn) => turn.id !== protectedId)
     .map((turn) => turn.id)
@@ -783,7 +887,6 @@ export function isConversationActive(
   const live = state.liveByConversationId[conversationId]
   return Boolean(
     live?.activeTurnId ||
-      live?.pendingSend ||
       state.summariesById[conversationId]?.status === "running"
   )
 }
@@ -791,7 +894,9 @@ export function isConversationActive(
 export function isAnyConversationRunning(state: ConversationState): boolean {
   return state.order.some((id) => isConversationActive(state, id)) ||
     Object.entries(state.liveByConversationId).some(
-      ([id]) => !state.summariesById[id] && isConversationActive(state, id)
+      ([id, live]) =>
+        Boolean(live.pendingSend) ||
+        (!state.summariesById[id] && isConversationActive(state, id))
     )
 }
 
@@ -864,33 +969,53 @@ export function ConversationProvider({
     let current = true
     const generation = state.recoveryGeneration
 
-    void Promise.all([api.getWorkspace(), api.listConversations()]).then(
-      ([workspace, conversations]) => {
-        if (!current) return
-        dispatch(
-          generation === 0
-            ? {
-                type: "listSucceeded",
-                workspace: workspace.workspace,
-                conversations,
-                generation,
-              }
-            : {
-                type: "recoveryListSucceeded",
-                conversations,
-                generation,
-              }
-        )
-      },
-      (error: unknown) => {
-        if (!current) return
+    void Promise.all([
+      api.getWorkspace().then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error })
+      ),
+      api.listConversations().then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error })
+      ),
+    ]).then(([workspaceResult, listResult]) => {
+      if (!current) return
+      if (!workspaceResult.ok) {
         dispatch({
           type: "listFailed",
-          message: errorMessage(error),
+          message: errorMessage(workspaceResult.error),
+          scope: generation > 0 ? "recovery" : "bootstrap",
           generation,
         })
+        return
       }
-    )
+      if (!listResult.ok) {
+        dispatch({
+          type: "listFailed",
+          message: errorMessage(listResult.error),
+          scope: generation > 0 ? "recovery" : "list",
+          generation,
+        })
+        return
+      }
+      const workspace = workspaceResult.value
+      const conversations = listResult.value
+      dispatch(
+        generation === 0
+          ? {
+              type: "listSucceeded",
+              workspace: workspace.workspace,
+              conversations,
+              generation,
+            }
+          : {
+              type: "recoveryListSucceeded",
+              workspace: workspace.workspace,
+              conversations,
+              generation,
+            }
+      )
+    })
 
     return () => {
       current = false
@@ -932,7 +1057,7 @@ export function ConversationProvider({
   }, [api, state.detailLoadGeneration, state.selectedId])
 
   const createConversation = useCallback(async () => {
-    if (createInFlight.current) return
+    if (createInFlight.current || state.recovering) return
     createInFlight.current = true
     dispatch({ type: "createStarted" })
     try {
@@ -947,7 +1072,7 @@ export function ConversationProvider({
     } finally {
       createInFlight.current = false
     }
-  }, [api])
+  }, [api, state.recovering])
 
   const select = useCallback((conversationId: string) => {
     dispatch({ type: "selected", conversationId })

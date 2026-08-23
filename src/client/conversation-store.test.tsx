@@ -203,7 +203,16 @@ function StoreProbe(): ReactNode {
       <div data-testid="known-details">
         {Object.keys(state.detailsById).join(",")}
       </div>
-      {state.error ? <div role="alert">{state.error}</div> : null}
+      {Object.values(state.errors)
+        .filter(Boolean)
+        .map((error) => {
+          const message = typeof error === "string" ? error : error?.message
+          return (
+            <div role="alert" key={message}>
+              {message}
+            </div>
+          )
+        })}
       {!state.loading.list ? <span>ready</span> : null}
       <button type="button" onClick={() => void createConversation()}>
         create

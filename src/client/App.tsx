@@ -50,6 +50,14 @@ function Workspace(): ReactNode {
     selectedId && live?.activeTurnId
       ? selectLiveText(state, selectedId, live.activeTurnId)
       : ""
+  const pageErrors = Object.entries(state.errors).filter(
+    (entry): entry is [string, string] =>
+      entry[0] !== "detail" && Boolean(entry[1])
+  )
+  const detailError =
+    state.errors.detail?.conversationId === selectedId
+      ? state.errors.detail.message
+      : null
 
   return (
     <div className="workspace-shell">
@@ -59,6 +67,7 @@ function Workspace(): ReactNode {
         selectedId={state.selectedId}
         loading={state.loading.list}
         creating={state.loading.create}
+        createDisabled={state.recovering}
         onCreate={() => void createConversation()}
         onSelect={select}
       />
@@ -72,21 +81,28 @@ function Workspace(): ReactNode {
             实时连接已断开，正在重连…
           </div>
         ) : null}
-        {state.error ? (
+        {pageErrors.map(([scope, message]) => (
+          <div className="page-error" role="alert" key={scope}>
+            <span>{message}</span>
+          </div>
+        ))}
+        {detailError ? (
           <div className="page-error" role="alert">
-            <span>{state.error}</span>
-            {state.errorScope === "detail" ? (
-              <button type="button" onClick={retrySelectedDetail}>
-                重试
-              </button>
-            ) : null}
+            <span>{detailError}</span>
+            <button
+              type="button"
+              disabled={state.loading.detail}
+              onClick={retrySelectedDetail}
+            >
+              重试
+            </button>
           </div>
         ) : null}
         <Thread
           conversation={selectedConversation}
           detail={selectedDetail}
           loading={state.loading.detail}
-          unavailable={state.errorScope === "detail"}
+          unavailable={Boolean(detailError)}
           turns={turns}
           liveText={liveText}
           tools={tools}
