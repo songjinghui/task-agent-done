@@ -80,6 +80,18 @@ V1 不启用 `experimentalApi`，避免把核心流程绑定到实验字段。
 
 PTY 包装 Codex TUI 需要解析终端字符流，协议脆弱，无法形成可靠的领域边界。
 
+### 3.3 ACP 决策
+
+V1 不使用 Agent Client Protocol（ACP）。Codex CLI 本身不直接提供 ACP 接口；
+使用 ACP 需要额外安装并监督 `codex-acp` Adapter，而该 Adapter 内部仍需连接
+Codex App Server。对于只支持 Codex 的 V1，这会增加协议转换、进程管理和版本
+兼容成本，但不会增加用户能力。
+
+通用业务层依赖 `AgentAdapter`，V1 的唯一实现是
+`CodexAppServerAdapter`。未来确定接入第二种 Agent 时，可以增加
+`AcpAdapter`，而不改变 Conversation Service、HTTP API、实时事件或 React
+Renderer。Codex App Server 原始 JSON-RPC 类型不得泄漏出 V1 Adapter。
+
 ## 4. 技术架构
 
 V1 使用一个 TypeScript 工程，不建立多包 Monorepo：
@@ -121,14 +133,30 @@ src/
 
 该组件只理解 Codex 协议，不读写 HTTP、React 或 SQLite。
 
-### 5.2 `CodexAdapter`
+### 5.2 `AgentAdapter` 与 `CodexAppServerAdapter`
 
-职责：
+`AgentAdapter` 是通用业务边界：
+
+```ts
+interface AgentAdapter {
+  createSession(workspace: string): Promise<{ externalSessionId: string }>
+  readSession(externalSessionId: string): Promise<ConversationDetail>
+  resumeSession(externalSessionId: string): Promise<void>
+  sendText(externalSessionId: string, text: string): Promise<void>
+  cancelTurn(externalSessionId: string): Promise<void>
+  respondToApproval(requestId: string, decision: "accept" | "decline"): Promise<void>
+  subscribe(handler: (event: ConversationEvent) => void): () => void
+}
+```
+
+V1 实现 `CodexAppServerAdapter`，职责是：
 
 - 将 TaskMux 的新建、读取、恢复、发送和取消操作映射到 App Server 方法；
 - 将 Agent 文本、工具状态、Turn 完成和错误转换为统一事件；
 - 将 TaskMux 的批准或拒绝决定映射为 Codex Approval Response；
 - 隐藏 Codex 原始消息形状，避免协议类型泄漏到 UI。
+
+V1 不实现 `AcpAdapter`，但未来实现必须遵守同一接口和统一事件模型。
 
 ### 5.3 `ConversationService`
 
@@ -494,6 +522,7 @@ V1 完成必须同时满足：
 - 通用可展开工具卡片；
 - 多 Workspace；
 - 多 Agent、多 CLI 和 Agent 协作；
+- ACP Client 和 `codex-acp` Adapter；
 - Task、Review、Handoff 和 Artifact；
 - 会话搜索、删除、归档、重命名和导出；
 - 模型、推理等级、Sandbox、Skill 和 MCP 配置页面；
