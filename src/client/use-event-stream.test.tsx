@@ -261,6 +261,196 @@ describe("live conversation reducer", () => {
     expect(isAnyConversationRunning(state)).toBe(true)
   })
 
+  it.each([
+    {
+      evidence: "tool",
+      event: tool("accepted-tool", "running"),
+      settleHttp: false,
+    },
+    {
+      evidence: "tool",
+      event: tool("accepted-tool", "running"),
+      settleHttp: true,
+    },
+    {
+      evidence: "approval",
+      event: approval("accepted-approval"),
+      settleHttp: false,
+    },
+    {
+      evidence: "approval",
+      event: approval("accepted-approval"),
+      settleHttp: true,
+    },
+  ])(
+    "keeps a $evidence-accepted optimistic user while running after HTTP settled=$settleHttp and selection reload",
+    ({ event, settleHttp }) => {
+      let state = loadedState()
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-owned",
+        text: "仍属于运行中 turn 的问题",
+      })
+      state = receive(state, 1, "c1", event, "send-owned")
+      if (settleHttp) {
+        state = conversationReducer(state, {
+          type: "sendSucceeded",
+          conversationId: "c1",
+          requestId: "send-owned",
+        })
+      }
+      state = conversationReducer(state, {
+        type: "selected",
+        conversationId: "c2",
+      })
+      state = conversationReducer(state, {
+        type: "selected",
+        conversationId: "c1",
+      })
+      state = conversationReducer(state, {
+        type: "detailRequested",
+        conversationId: "c1",
+        requestId: 1,
+      })
+      state = conversationReducer(state, {
+        type: "detailSucceeded",
+        conversationId: "c1",
+        requestId: 1,
+        detail: { conversationId: "c1", turns: [] },
+      })
+
+      expect(selectDisplayedTurns(state, "c1").map((turn) => turn.text)).toEqual([
+        "仍属于运行中 turn 的问题",
+      ])
+      expect(state.summariesById.c1?.status).toBe("running")
+    }
+  )
+
+  it("moves accepted optimistic ownership to a new send without protecting the old transient", () => {
+    let state = loadedState()
+    state = conversationReducer(state, {
+      type: "sendOptimistic",
+      conversationId: "c1",
+      requestId: "send-old",
+      text: "旧问题",
+    })
+    state = receive(
+      state,
+      1,
+      "c1",
+      approval("old-approval"),
+      "send-old"
+    )
+    state = conversationReducer(state, {
+      type: "sendSucceeded",
+      conversationId: "c1",
+      requestId: "send-old",
+    })
+    state = receive(
+      state,
+      2,
+      "c1",
+      { type: "turn_completed", turnId: "old-turn" },
+      "send-old"
+    )
+    state = conversationReducer(state, {
+      type: "detailRequested",
+      conversationId: "c1",
+      requestId: 1,
+    })
+    state = conversationReducer(state, {
+      type: "detailFailed",
+      conversationId: "c1",
+      requestId: 1,
+      message: "暂时失败",
+    })
+
+    state = conversationReducer(state, {
+      type: "sendOptimistic",
+      conversationId: "c1",
+      requestId: "send-new",
+      text: "新问题",
+    })
+    state = receive(state, 3, "c1", tool("new-tool", "running"), "send-new")
+    state = conversationReducer(state, {
+      type: "detailRequested",
+      conversationId: "c1",
+      requestId: 2,
+    })
+    state = conversationReducer(state, {
+      type: "detailSucceeded",
+      conversationId: "c1",
+      requestId: 2,
+      detail: {
+        conversationId: "c1",
+        turns: [
+          {
+            id: "codex-old-user",
+            role: "user",
+            text: "旧问题",
+            status: "completed",
+          },
+        ],
+      },
+    })
+
+    expect(selectDisplayedTurns(state, "c1").map((turn) => turn.text)).toEqual([
+      "旧问题",
+      "新问题",
+    ])
+  })
+
+  it("does not carry accepted optimistic ownership into a new stream epoch", () => {
+    let state = loadedState()
+    state = conversationReducer(state, {
+      type: "sendOptimistic",
+      conversationId: "c1",
+      requestId: "send-before-reopen",
+      text: "重连前问题",
+    })
+    state = receive(
+      state,
+      1,
+      "c1",
+      tool("before-reopen-tool", "running"),
+      "send-before-reopen"
+    )
+    state = conversationReducer(state, {
+      type: "sendSucceeded",
+      conversationId: "c1",
+      requestId: "send-before-reopen",
+    })
+
+    state = conversationReducer(state, { type: "streamReopened", epoch: 1 })
+    state = receive(state, 1, "c1", tool("recovered-tool", "running"))
+    state = conversationReducer(state, {
+      type: "detailRequested",
+      conversationId: "c1",
+      requestId: 1,
+    })
+    state = conversationReducer(state, {
+      type: "detailSucceeded",
+      conversationId: "c1",
+      requestId: 1,
+      detail: {
+        conversationId: "c1",
+        turns: [
+          {
+            id: "codex-recovered-user",
+            role: "user",
+            text: "重连前问题",
+            status: "completed",
+          },
+        ],
+      },
+    })
+
+    expect(selectDisplayedTurns(state, "c1").map((turn) => turn.text)).toEqual([
+      "重连前问题",
+    ])
+  })
+
   it("starts a new stream epoch by clearing stale turn UI and accepts recovered statuses", () => {
     let state = loadedState()
     state = receive(state, 80, "c2", { type: "turn_started", turnId: "lost" })

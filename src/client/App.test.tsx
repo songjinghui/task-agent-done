@@ -966,16 +966,24 @@ describe("App", () => {
     const source = FakeEventSource.instances[0]!
     act(() => {
       source.open()
-      source.event(1, first.id, { type: "turn_started", turnId: "retry-turn" })
-      source.event(2, first.id, {
-        type: "text_delta",
-        turnId: "retry-turn",
-        text: "保留回答",
-      })
-      source.event(3, first.id, {
-        type: "turn_completed",
-        turnId: "retry-turn",
-      })
+      source.event(
+        1,
+        first.id,
+        { type: "turn_started", turnId: "retry-turn" },
+        "send-1"
+      )
+      source.event(
+        2,
+        first.id,
+        { type: "text_delta", turnId: "retry-turn", text: "保留回答" },
+        "send-1"
+      )
+      source.event(
+        3,
+        first.id,
+        { type: "turn_completed", turnId: "retry-turn" },
+        "send-1"
+      )
     })
 
     expect(await screen.findByRole("alert")).toHaveTextContent("终态历史同步失败")

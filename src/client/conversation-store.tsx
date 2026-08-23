@@ -74,6 +74,7 @@ export type LiveConversationState = {
   cancelPending: boolean
   cancelRequestId: string | null
   cancelError: string | null
+  acceptedOptimisticTurnId: string | null
   pendingSend: {
     requestId: string
     optimisticTurnId: string
@@ -269,6 +270,7 @@ export function conversationReducer(
             toolOrder: [],
             approval: null,
             approvalError: null,
+            acceptedOptimisticTurnId: null,
             pendingSend: null,
             cancelPending: false,
             cancelRequestId: null,
@@ -431,6 +433,7 @@ export function conversationReducer(
             acceptedByEvent: false,
             turnActivityObserved: false,
           },
+          acceptedOptimisticTurnId: null,
           sendError: null,
           error: null,
         }
@@ -675,13 +678,18 @@ function observeEventForPendingSend(
   envelope: ConversationEventEnvelope
 ): LiveConversationState {
   if (!live.pendingSend) return live
+  const acceptedByThisEvent =
+    envelope.clientRequestId === live.pendingSend.requestId
   return {
     ...live,
+    acceptedOptimisticTurnId: acceptedByThisEvent
+      ? live.pendingSend.optimisticTurnId
+      : live.acceptedOptimisticTurnId,
     pendingSend: {
       ...live.pendingSend,
       acceptedByEvent:
         live.pendingSend.acceptedByEvent ||
-        envelope.clientRequestId === live.pendingSend.requestId,
+        acceptedByThisEvent,
       turnActivityObserved:
         live.pendingSend.turnActivityObserved ||
         isTurnActivity(envelope.payload),
@@ -765,6 +773,7 @@ function emptyLive(): LiveConversationState {
     cancelPending: false,
     cancelRequestId: null,
     cancelError: null,
+    acceptedOptimisticTurnId: null,
     pendingSend: null,
     error: null,
   }
@@ -825,6 +834,10 @@ function retireTransientTurns(
   return withLive(state, conversationId, {
     ...live,
     transientTurns: live.transientTurns.filter((turn) => !retired.has(turn.id)),
+    acceptedOptimisticTurnId:
+      live.acceptedOptimisticTurnId && retired.has(live.acceptedOptimisticTurnId)
+        ? null
+        : live.acceptedOptimisticTurnId,
   })
 }
 
@@ -835,11 +848,9 @@ function retirableTransientIds(
   const protectedId =
     live.pendingSend && !live.pendingSend.acceptedByEvent
       ? live.pendingSend.optimisticTurnId
-      : live.activeTurnId
-      ? [...live.transientTurns]
-          .reverse()
-          .find((turn) => turn.role === "user")?.id
-      : undefined
+      : live.status === "running"
+        ? (live.acceptedOptimisticTurnId ?? undefined)
+        : undefined
   return live.transientTurns
     .filter((turn) => turn.id !== protectedId)
     .map((turn) => turn.id)
