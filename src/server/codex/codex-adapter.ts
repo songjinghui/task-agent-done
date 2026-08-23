@@ -73,6 +73,14 @@ type PendingApproval = {
   turnKey: string
 }
 
+type BufferedTurnEvent = {
+  payload: AgentAdapterEvent["payload"]
+  approval?: {
+    requestId: string
+    pending: PendingApproval
+  }
+}
+
 type AdapterActiveTurn = {
   operationId: string
   turnId: string
@@ -95,7 +103,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   readonly #latestStartOperations = new Map<string, string>()
   readonly #pendingStartOperations = new Map<string, Set<string>>()
   readonly #turnOperations = new Map<string, string>()
-  readonly #bufferedTurnEvents = new Map<string, AgentAdapterEvent["payload"][]>()
+  readonly #bufferedTurnEvents = new Map<string, BufferedTurnEvent[]>()
   readonly #runningTools = new Map<string, Map<string, RunningTool>>()
   #nextApprovalId = 1
 
@@ -147,7 +155,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
       const key = turnKey(externalSessionId, turn.id)
       this.#turnOperations.set(key, operationId)
       const buffered = this.#bufferedTurnEvents.get(key) ?? []
-      const alreadyTerminal = buffered.some(isTurnTerminalPayload)
+      const alreadyTerminal = buffered.some(({ payload }) =>
+        isTurnTerminalPayload(payload)
+      )
       if (
         this.#latestStartOperations.get(externalSessionId) === operationId &&
         !alreadyTerminal
@@ -156,9 +166,19 @@ export class CodexAppServerAdapter implements AgentAdapter {
       }
       this.#settleStartOperation(externalSessionId, operationId)
       this.#bufferedTurnEvents.delete(key)
-      for (const payload of buffered) {
-        this.#deliverTurnEvent(externalSessionId, turn.id, operationId, payload)
-        if (isTurnTerminalPayload(payload)) break
+      let terminalDelivered = false
+      for (const bufferedEvent of buffered) {
+        if (terminalDelivered) {
+          this.#declineBufferedApproval(bufferedEvent)
+          continue
+        }
+        this.#deliverTurnEvent(
+          externalSessionId,
+          turn.id,
+          operationId,
+          bufferedEvent
+        )
+        terminalDelivered = isTurnTerminalPayload(bufferedEvent.payload)
       }
       this.#discardOrphanedBuffers(externalSessionId)
       return { turnId: turn.id }
@@ -281,16 +301,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const tool = normalizeTool(item, started)
     if (!tool) return
 
-    const key = turnKey(threadId, turnId)
-    if (tool.status === "running") {
-      const tools = this.#runningTools.get(key) ?? new Map<string, RunningTool>()
-      tools.set(tool.id, { id: tool.id, label: tool.label })
-      this.#runningTools.set(key, tools)
-    } else {
-      const tools = this.#runningTools.get(key)
-      tools?.delete(tool.id)
-      if (tools?.size === 0) this.#runningTools.delete(key)
-    }
     this.#emitTurnEvent(threadId, turnId, { type: "tool_status", tool })
   }
 
@@ -299,18 +309,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const turnId = turn && stringField(turn, "id")
     const status = turn && stringField(turn, "status")
     if (!turnId) return
-
-    const tools = this.#runningTools.get(turnKey(threadId, turnId))
-    if (tools) {
-      const terminalToolStatus = status === "interrupted" ? "declined" : "failed"
-      for (const tool of tools.values()) {
-        this.#emitTurnEvent(threadId, turnId, {
-          type: "tool_status",
-          tool: { ...tool, status: terminalToolStatus },
-        })
-      }
-      this.#runningTools.delete(turnKey(threadId, turnId))
-    }
 
     if (status === "interrupted") {
       this.#emitTurnEvent(threadId, turnId, { type: "turn_interrupted", turnId })
@@ -373,44 +371,70 @@ export class CodexAppServerAdapter implements AgentAdapter {
       return
     }
 
-    const requestId = `approval_${this.#nextApprovalId++}`
     const key = turnKey(threadId, turnId)
-    this.#pendingApprovals.set(requestId, { serverRequestId: id, turnKey: key })
-    this.#emitTurnEvent(threadId, turnId, {
-      type: "approval_requested",
-      request: { id: requestId, kind: approval.kind, label: approval.label },
-    })
+    if (
+      !this.#turnOperations.has(key) &&
+      !this.#pendingStartOperations.get(threadId)?.size
+    ) {
+      this.#client.respond(id, { decision: "decline" })
+      return
+    }
+
+    const requestId = `approval_${this.#nextApprovalId++}`
+    this.#emitTurnEvent(
+      threadId,
+      turnId,
+      {
+        type: "approval_requested",
+        request: { id: requestId, kind: approval.kind, label: approval.label },
+      },
+      { requestId, pending: { serverRequestId: id, turnKey: key } }
+    )
   }
 
   #emitTurnEvent(
     externalSessionId: string,
     turnId: string,
-    payload: AgentAdapterEvent["payload"]
+    payload: AgentAdapterEvent["payload"],
+    approval?: BufferedTurnEvent["approval"]
   ): void {
     const key = turnKey(externalSessionId, turnId)
     const operationId = this.#turnOperations.get(key)
     if (operationId === undefined) {
       if (this.#pendingStartOperations.get(externalSessionId)?.size) {
         const buffered = this.#bufferedTurnEvents.get(key) ?? []
-        buffered.push(payload)
+        buffered.push({ payload, approval })
         this.#bufferedTurnEvents.set(key, buffered)
       }
       return
     }
-    this.#deliverTurnEvent(externalSessionId, turnId, operationId, payload)
+    this.#deliverTurnEvent(externalSessionId, turnId, operationId, {
+      payload,
+      approval,
+    })
   }
 
   #deliverTurnEvent(
     externalSessionId: string,
     turnId: string,
     operationId: string,
-    payload: AgentAdapterEvent["payload"]
+    bufferedEvent: BufferedTurnEvent
   ): void {
+    const { payload, approval } = bufferedEvent
+    if (approval) {
+      this.#pendingApprovals.set(approval.requestId, approval.pending)
+    }
+    if (payload.type === "tool_status") {
+      this.#recordToolStatus(externalSessionId, turnId, payload.tool)
+    }
     if (
       payload.type === "turn_started" &&
       this.#latestStartOperations.get(externalSessionId) === operationId
     ) {
       this.#setActiveTurn(externalSessionId, { operationId, turnId })
+    }
+    if (isTurnTerminalPayload(payload)) {
+      this.#finishRunningTools(externalSessionId, turnId, operationId, payload)
     }
     this.#emit(externalSessionId, payload, operationId)
     if (isTurnTerminalPayload(payload)) {
@@ -472,11 +496,67 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   #discardTurnBookkeeping(key: string): void {
+    const buffered = this.#bufferedTurnEvents.get(key) ?? []
     this.#bufferedTurnEvents.delete(key)
+    for (const bufferedEvent of buffered) {
+      this.#declineBufferedApproval(bufferedEvent)
+    }
     this.#runningTools.delete(key)
     for (const [requestId, pending] of this.#pendingApprovals) {
-      if (pending.turnKey === key) this.#pendingApprovals.delete(requestId)
+      if (pending.turnKey === key) {
+        this.#pendingApprovals.delete(requestId)
+        this.#client.respond(pending.serverRequestId, { decision: "decline" })
+      }
     }
+  }
+
+  #declineBufferedApproval(bufferedEvent: BufferedTurnEvent): void {
+    if (bufferedEvent.approval) {
+      this.#client.respond(bufferedEvent.approval.pending.serverRequestId, {
+        decision: "decline",
+      })
+    }
+  }
+
+  #recordToolStatus(
+    externalSessionId: string,
+    turnId: string,
+    tool: ToolStatus
+  ): void {
+    const key = turnKey(externalSessionId, turnId)
+    if (tool.status === "running") {
+      const tools = this.#runningTools.get(key) ?? new Map<string, RunningTool>()
+      tools.set(tool.id, { id: tool.id, label: tool.label })
+      this.#runningTools.set(key, tools)
+      return
+    }
+    const tools = this.#runningTools.get(key)
+    tools?.delete(tool.id)
+    if (tools?.size === 0) this.#runningTools.delete(key)
+  }
+
+  #finishRunningTools(
+    externalSessionId: string,
+    turnId: string,
+    operationId: string,
+    terminalPayload: AgentAdapterEvent["payload"]
+  ): void {
+    const key = turnKey(externalSessionId, turnId)
+    const tools = this.#runningTools.get(key)
+    if (!tools) return
+    const terminalToolStatus =
+      terminalPayload.type === "turn_interrupted" ? "declined" : "failed"
+    for (const tool of tools.values()) {
+      this.#emit(
+        externalSessionId,
+        {
+          type: "tool_status",
+          tool: { ...tool, status: terminalToolStatus },
+        },
+        operationId
+      )
+    }
+    this.#runningTools.delete(key)
   }
 
   #emit(

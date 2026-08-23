@@ -703,6 +703,80 @@ describe("CodexAppServerAdapter", () => {
     )
   })
 
+  it("declines a late approval that cannot be associated with a start", () => {
+    const { events, fake } = setup()
+
+    fake.emit({
+      type: "server_request",
+      id: "wire-late",
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: "thr_1",
+        turnId: "turn_old",
+        itemId: "command_old",
+      },
+    })
+
+    expect(fake.responses).toEqual([
+      { id: "wire-late", result: { decision: "decline" } },
+    ])
+    expect(events).toEqual([])
+  })
+
+  it("declines a buffered approval once when its start is rejected", async () => {
+    const { adapter, events, fake } = setup()
+    const start = deferredValue<{ turn: { id: string } }>()
+    fake.enqueue("turn/start", start.promise)
+    const sending = adapter.sendText("thr_1", "hello", "operation-1")
+    await Promise.resolve()
+    fake.emit({
+      type: "server_request",
+      id: "wire-buffered",
+      method: "item/fileChange/requestApproval",
+      params: { threadId: "thr_1", turnId: "turn_1", itemId: "file_1" },
+    })
+
+    start.reject(new Error("start rejected"))
+    await expect(sending).rejects.toThrow("start rejected")
+    fake.emit({ type: "exit", code: 17, signal: null, stderr: "" })
+
+    expect(fake.responses).toEqual([
+      { id: "wire-buffered", result: { decision: "decline" } },
+    ])
+    expect(events).toEqual([])
+    await expect(adapter.respondToApproval("approval_1", "accept")).rejects.toThrow(
+      "approval_expired"
+    )
+  })
+
+  it("does not retain an orphan tool before a later turn association", async () => {
+    const { adapter, events, fake } = setup()
+    fake.emit(
+      notification("item/started", {
+        threadId: "thr_1",
+        turnId: "turn_reused",
+        item: commandItem("orphan_command", "inProgress"),
+      })
+    )
+
+    fake.enqueue("turn/start", { turn: { id: "turn_reused" } })
+    await adapter.sendText("thr_1", "hello", "operation-1")
+    fake.emit(
+      notification("turn/completed", {
+        threadId: "thr_1",
+        turn: { id: "turn_reused", status: "completed", items: [] },
+      })
+    )
+
+    expect(events).toEqual([
+      event(
+        "thr_1",
+        { type: "turn_completed", turnId: "turn_reused" },
+        "operation-1"
+      ),
+    ])
+  })
+
   it("safely declines unknown server interactions and reports them", () => {
     const { events, fake } = setup()
 

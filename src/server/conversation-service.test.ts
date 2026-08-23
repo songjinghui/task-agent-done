@@ -417,6 +417,34 @@ describe("ConversationService", () => {
     expect(repository.getById(conversation.id)?.title).toBe("new title")
   })
 
+  it("keeps accepted turn ownership when the title update fails", async () => {
+    const { adapter, eventSink, repository, service } = createHarness()
+    const first = await service.create()
+    const second = await service.create()
+    repository.updateTitle = () => {
+      throw new Error("local title write failed")
+    }
+
+    await expect(service.sendText(first.id, "accepted prompt")).resolves.toBeUndefined()
+    expect(repository.getById(first.id)?.status).toBe("running")
+    await expect(service.sendText(second.id, "blocked")).rejects.toMatchObject({
+      code: "turn_conflict",
+    })
+    expect(eventSink.events.at(-1)).toEqual({
+      conversationId: first.id,
+      payload: {
+        type: "error",
+        code: "conversation_title_update_failed",
+        message: "Failed to update the conversation title.",
+        terminal: false,
+      },
+    })
+
+    adapter.emit("session-1", { type: "turn_completed", turnId: "t1" })
+    expect(repository.getById(first.id)?.status).toBe("idle")
+    await expect(service.sendText(second.id, "now allowed")).resolves.toBeUndefined()
+  })
+
   it("keeps ownership on non-terminal adapter errors", async () => {
     const { adapter, eventSink, repository, service } = createHarness()
     const first = await service.create()

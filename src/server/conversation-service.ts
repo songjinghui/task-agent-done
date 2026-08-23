@@ -108,17 +108,16 @@ export class ConversationService {
     this.#activeConversationId = conversationId
     this.#pendingTurnStarts.set(conversationId, ownership)
 
+    let accepted: { turnId: string }
     try {
       this.#repository.setStatus(conversationId, "running")
       await this.#adapter.resumeSession(conversation.externalSessionId)
       if (this.#activeTurns.get(conversationId) !== ownership) return
-      const accepted = await this.#adapter.sendText(
+      accepted = await this.#adapter.sendText(
         conversation.externalSessionId,
         text,
         ownership.operationId
       )
-      if (this.#activeTurns.get(conversationId) !== ownership) return
-      this.#acceptActiveTurn(conversationId, ownership, accepted.turnId)
     } catch (error) {
       this.#finishActiveTurn(conversationId, "failed", ownership)
       throw error
@@ -127,6 +126,9 @@ export class ConversationService {
         this.#pendingTurnStarts.delete(conversationId)
       }
     }
+
+    if (this.#activeTurns.get(conversationId) !== ownership) return
+    this.#acceptActiveTurn(conversationId, ownership, accepted.turnId)
 
     if (
       this.#cancellationRequests.get(conversationId) === ownership &&
@@ -291,11 +293,20 @@ export class ConversationService {
     if (ownership.turnId !== undefined && ownership.turnId !== turnId) return false
     ownership.turnId = turnId
     if (!ownership.titleApplied) {
-      const conversation = this.#repository.getById(conversationId)
-      if (conversation?.title === DEFAULT_TITLE) {
-        this.#repository.updateTitle(conversationId, ownership.titleCandidate)
-      }
       ownership.titleApplied = true
+      try {
+        const conversation = this.#repository.getById(conversationId)
+        if (conversation?.title === DEFAULT_TITLE) {
+          this.#repository.updateTitle(conversationId, ownership.titleCandidate)
+        }
+      } catch {
+        this.#eventSink.publish(conversationId, {
+          type: "error",
+          code: "conversation_title_update_failed",
+          message: "Failed to update the conversation title.",
+          terminal: false,
+        })
+      }
     }
     return true
   }
