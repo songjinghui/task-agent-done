@@ -1,13 +1,13 @@
 import "@testing-library/jest-dom/vitest"
-import { act, cleanup, render, screen, within } from "@testing-library/react"
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type {
   ConversationDetail,
   ConversationSummary,
 } from "../shared/contracts.js"
 import { App } from "./App.js"
-import type { TaskMuxApi } from "./api.js"
+import { TaskMuxApiError, type TaskMuxApi } from "./api.js"
 
 const first: ConversationSummary = {
   id: "c1",
@@ -25,7 +25,14 @@ const second: ConversationSummary = {
   updatedAt: "2026-08-23T09:10:00.000Z",
 }
 
-afterEach(cleanup)
+beforeEach(() => {
+  FakeEventSource.instances = []
+})
+
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
 
 describe("App", () => {
   it("shows loading before rendering the workspace and conversation navigation", async () => {
@@ -260,6 +267,205 @@ describe("App", () => {
     expect(screen.getByText("还没有会话")).toBeVisible()
     expect(screen.getByRole("button", { name: "新建会话" })).toBeEnabled()
   })
+
+  it("renders live text, safe tools and approvals, then keeps completed text once", async () => {
+    installEventSource()
+    const respondToApproval = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [first],
+          respondToApproval,
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    const source = FakeEventSource.instances[0]!
+
+    act(() => {
+      source.open()
+      source.event(1, first.id, { type: "turn_started", turnId: "t1" })
+      source.event(2, first.id, {
+        type: "text_delta",
+        turnId: "t1",
+        text: "实时回答",
+      })
+      source.event(3, first.id, {
+        type: "tool_status",
+        tool: {
+          id: "tool-1",
+          label: "unknown /secret/path command output",
+          status: "running",
+        },
+      })
+      source.event(4, first.id, {
+        type: "approval_requested",
+        request: {
+          id: "approval-1",
+          kind: "command",
+          label: "rm -rf /secret/path",
+        },
+      })
+    })
+
+    expect(screen.getByText("实时回答")).toBeVisible()
+    expect(screen.getByRole("status", { name: "使用工具：运行中" })).toBeVisible()
+    expect(
+      screen.getByRole("group", { name: "Codex 请求运行命令" })
+    ).toBeVisible()
+    expect(document.body).not.toHaveTextContent("/secret/path")
+    expect(screen.getByRole("button", { name: "取消" })).toBeVisible()
+
+    await user.click(screen.getByRole("button", { name: "批准" }))
+    expect(respondToApproval).toHaveBeenCalledWith(
+      first.id,
+      "approval-1",
+      "accept"
+    )
+    await waitFor(() =>
+      expect(screen.queryByRole("group", { name: "Codex 请求运行命令" })).not.toBeInTheDocument()
+    )
+
+    act(() => {
+      source.event(5, first.id, { type: "turn_completed", turnId: "t1" })
+    })
+    expect(screen.getAllByText("实时回答")).toHaveLength(1)
+    expect(screen.queryByRole("status", { name: /使用工具/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "取消" })).not.toBeInTheDocument()
+  })
+
+  it("keeps an HTTP-accepted send locked until its SSE terminal event", async () => {
+    installEventSource()
+    const accepted = deferred<{ accepted: true }>()
+    const sendMessage = vi.fn(() => accepted.promise)
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [first],
+          sendMessage,
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    const input = screen.getByRole("textbox", { name: "消息" })
+
+    await user.type(input, "执行测试{enter}")
+    expect(sendMessage).toHaveBeenCalledWith(first.id, "执行测试")
+    expect(input).toHaveValue("执行测试")
+    expect(screen.getByText("执行测试", { selector: ".message-text" })).toBeVisible()
+
+    accepted.resolve({ accepted: true })
+    await waitFor(() => expect(input).toHaveValue(""))
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled()
+
+    const source = FakeEventSource.instances[0]!
+    act(() => {
+      source.event(1, first.id, { type: "turn_started", turnId: "t1" })
+      source.event(2, first.id, { type: "turn_completed", turnId: "t1" })
+    })
+    await user.type(input, "下一条")
+    expect(screen.getByRole("button", { name: "发送" })).toBeEnabled()
+  })
+
+  it("preserves a conflict draft and removes its unaccepted optimistic message", async () => {
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [first],
+          sendMessage: async () => {
+            throw new TaskMuxApiError("turn_conflict", "sensitive conflict", 409)
+          },
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    const input = screen.getByRole("textbox", { name: "消息" })
+
+    await user.type(input, "冲突草稿{enter}")
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("发送失败，请重试。")
+    expect(screen.getByRole("alert")).not.toHaveTextContent("sensitive conflict")
+    expect(input).toHaveValue("冲突草稿")
+    expect(
+      screen.queryByText("冲突草稿", { selector: ".message-text" })
+    ).not.toBeInTheDocument()
+  })
+
+  it("keeps an SSE-accepted optimistic message when the HTTP transport response is lost", async () => {
+    installEventSource()
+    const response = deferred<{ accepted: true }>()
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [first],
+          sendMessage: () => response.promise,
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    const input = screen.getByRole("textbox", { name: "消息" })
+    await user.type(input, "响应丢失{enter}")
+    act(() => {
+      FakeEventSource.instances[0]!.event(1, first.id, {
+        type: "turn_started",
+        turnId: "t1",
+      })
+    })
+    response.reject(new Error("provider transport secret"))
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("发送失败，请重试。")
+    expect(input).toHaveValue("响应丢失")
+    expect(screen.getByText("响应丢失", { selector: ".message-text" })).toBeVisible()
+    expect(screen.getByRole("button", { name: "取消" })).toBeVisible()
+  })
+
+  it("applies the global running lock but only cancels the selected active conversation", async () => {
+    const cancelConversation = vi.fn(async () => {})
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [first, second],
+          cancelConversation,
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    const input = screen.getByRole("textbox", { name: "消息" })
+    await user.type(input, "被全局锁阻止")
+    expect(screen.getByRole("button", { name: "发送" })).toBeDisabled()
+    expect(screen.queryByRole("button", { name: "取消" })).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole("button", { name: /第二个会话/ }))
+    expect(await screen.findByRole("button", { name: "取消" })).toBeVisible()
+    await user.click(screen.getByRole("button", { name: "取消" }))
+    expect(cancelConversation).toHaveBeenCalledOnce()
+    expect(cancelConversation).toHaveBeenCalledWith(second.id)
+
+    await user.click(screen.getByRole("button", { name: /修复 README 测试/ }))
+    expect(screen.queryByRole("button", { name: "取消" })).not.toBeInTheDocument()
+  })
+
+  it("shows the EventSource reconnect state without creating another connection", async () => {
+    installEventSource()
+    render(<App api={fakeApi()} />)
+    await screen.findByText("还没有会话")
+    const source = FakeEventSource.instances[0]!
+
+    act(() => source.fail())
+    expect(screen.getByRole("status", { name: "事件流状态" })).toHaveTextContent(
+      "实时连接已断开，正在重连…"
+    )
+    expect(FakeEventSource.instances).toHaveLength(1)
+
+    act(() => source.open())
+    expect(screen.queryByRole("status", { name: "事件流状态" })).not.toBeInTheDocument()
+    expect(FakeEventSource.instances).toHaveLength(1)
+  })
 })
 
 function fakeApi(overrides: Partial<TaskMuxApi> = {}): TaskMuxApi {
@@ -295,10 +501,50 @@ function turn(
 function deferred<T>(): {
   promise: Promise<T>
   resolve(value: T): void
+  reject(reason: unknown): void
 } {
   let resolve!: (value: T) => void
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise
+    reject = rejectPromise
   })
-  return { promise, resolve }
+  return { promise, resolve, reject }
+}
+
+function installEventSource(): void {
+  vi.stubGlobal("EventSource", FakeEventSource)
+}
+
+class FakeEventSource {
+  static instances: FakeEventSource[] = []
+  onopen: (() => void) | null = null
+  onerror: (() => void) | null = null
+  onmessage: ((event: MessageEvent<string>) => void) | null = null
+
+  constructor(readonly url: string | URL) {
+    FakeEventSource.instances.push(this)
+  }
+
+  open(): void {
+    this.onopen?.()
+  }
+
+  fail(): void {
+    this.onerror?.()
+  }
+
+  event(
+    seq: number,
+    conversationId: string,
+    payload: import("../shared/contracts.js").ConversationEvent
+  ): void {
+    this.onmessage?.(
+      new MessageEvent("message", {
+        data: JSON.stringify({ conversationId, seq, payload }),
+      })
+    )
+  }
+
+  close(): void {}
 }

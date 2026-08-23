@@ -28,6 +28,11 @@ button:focus-visible {
   outline-offset: 2px;
 }
 
+textarea:focus-visible {
+  outline: 3px solid #85a9ff;
+  outline-offset: 2px;
+}
+
 .workspace-shell {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
@@ -214,6 +219,18 @@ button:focus-visible {
   border-radius: 10px;
 }
 
+.stream-status {
+  max-width: 840px;
+  margin: 18px auto 0;
+  padding: 9px 14px;
+  color: #695122;
+  text-align: center;
+  background: #fff8df;
+  border: 1px solid #e7d29d;
+  border-radius: 9px;
+  font-size: 0.82rem;
+}
+
 .page-error button {
   flex: 0 0 auto;
   padding: 6px 12px;
@@ -313,6 +330,127 @@ button:focus-visible {
   white-space: pre-wrap;
 }
 
+.tool-list {
+  display: flex;
+  margin: 0 0 16px;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.tool-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #596055;
+  font-size: 0.82rem;
+}
+
+.tool-failed,
+.tool-declined {
+  color: #8b3d36;
+}
+
+.approval-bar {
+  display: grid;
+  margin: 16px 0;
+  padding: 14px 16px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px 16px;
+  background: #fff8df;
+  border: 1px solid #e7d29d;
+  border-radius: 10px;
+  font-size: 0.88rem;
+}
+
+.approval-actions,
+.composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.approval-bar button,
+.composer button {
+  padding: 7px 13px;
+  color: #20251f;
+  background: #fff;
+  border: 1px solid #b9bdb5;
+  border-radius: 7px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.approval-bar button:disabled,
+.composer button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.approval-bar [role="alert"],
+.composer [role="alert"] {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #8b3d36;
+  font-size: 0.8rem;
+}
+
+.turn-error {
+  margin: 16px 0;
+  padding: 10px 12px;
+  color: #7d231c;
+  background: #fff0ed;
+  border: 1px solid #f2b8b0;
+  border-radius: 8px;
+}
+
+.composer {
+  position: sticky;
+  bottom: 18px;
+  display: grid;
+  margin-top: 28px;
+  padding: 14px;
+  gap: 9px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid #d4d7d0;
+  border-radius: 14px;
+  box-shadow: 0 12px 34px rgba(30, 37, 29, 0.09);
+  backdrop-filter: blur(12px);
+}
+
+.composer-label {
+  color: #596055;
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.composer textarea {
+  width: 100%;
+  min-height: 86px;
+  padding: 11px 12px;
+  resize: vertical;
+  color: inherit;
+  background: #fafbf8;
+  border: 1px solid #cfd3ca;
+  border-radius: 9px;
+  font: inherit;
+  line-height: 1.5;
+}
+
+.composer-actions > [role="status"] {
+  min-width: 0;
+  margin-right: auto;
+  color: #7d231c;
+  font-size: 0.75rem;
+}
+
+.composer-actions button[type="submit"] {
+  color: #20251f;
+  background: #d6f58f;
+  border-color: #bddb77;
+}
+
 @media (max-width: 719px) {
   .workspace-shell {
     display: block;
@@ -329,7 +467,8 @@ button:focus-visible {
   }
 
   .thread,
-  .page-error {
+  .page-error,
+  .stream-status {
     width: calc(100% - 28px);
   }
 
@@ -343,5 +482,13 @@ button:focus-visible {
 
   .message {
     max-width: 96%;
+  }
+
+  .approval-bar {
+    grid-template-columns: 1fr;
+  }
+
+  .approval-actions {
+    justify-content: flex-start;
   }
 }
