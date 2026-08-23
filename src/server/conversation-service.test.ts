@@ -48,7 +48,9 @@ class FakeAgentAdapter implements AgentAdapter {
   onCancelTurn: (externalSessionId: string) => Promise<void> = async () => {}
 
   #nextSessionId = 1
+  #nextTurnId = 1
   #listeners = new Set<(event: AgentAdapterEvent) => void>()
+  #operationIds = new Map<string, string>()
 
   async createSession(workspace: string): Promise<{ externalSessionId: string }> {
     this.createSessionCalls.push(workspace)
@@ -65,9 +67,16 @@ class FakeAgentAdapter implements AgentAdapter {
     return this.onResumeSession(externalSessionId)
   }
 
-  sendText(externalSessionId: string, text: string): Promise<void> {
+  async sendText(
+    externalSessionId: string,
+    text: string,
+    operationId: string
+  ): Promise<{ turnId: string }> {
     this.sendTextCalls.push({ externalSessionId, text })
-    return this.onSendText(externalSessionId, text)
+    this.#operationIds.set(externalSessionId, operationId)
+    const turnId = `t${this.#nextTurnId++}`
+    await this.onSendText(externalSessionId, text)
+    return { turnId }
   }
 
   cancelTurn(externalSessionId: string): Promise<void> {
@@ -87,11 +96,33 @@ class FakeAgentAdapter implements AgentAdapter {
     return () => this.#listeners.delete(handler)
   }
 
-  emit(externalSessionId: string, payload: ConversationEvent): void {
+  operationId(externalSessionId: string): string | undefined {
+    return this.#operationIds.get(externalSessionId)
+  }
+
+  emit(
+    externalSessionId: string,
+    payload: ConversationEvent,
+    operationId = turnBoundPayload(payload)
+      ? this.#operationIds.get(externalSessionId)
+      : undefined
+  ): void {
     for (const listener of this.#listeners) {
-      listener({ externalSessionId, payload })
+      listener({ externalSessionId, operationId, payload })
     }
   }
+}
+
+function turnBoundPayload(payload: ConversationEvent): boolean {
+  return (
+    payload.type === "turn_started" ||
+    payload.type === "text_delta" ||
+    payload.type === "tool_status" ||
+    payload.type === "approval_requested" ||
+    payload.type === "turn_completed" ||
+    payload.type === "turn_interrupted" ||
+    (payload.type === "error" && payload.terminal && payload.scope === "turn")
+  )
 }
 
 class RecordingEventSink implements ConversationEventSink {
@@ -302,14 +333,14 @@ describe("ConversationService", () => {
     const first = await service.create()
     const second = await service.create()
     await service.sendText(first.id, "first")
-    adapter.emit("session-1", { type: "turn_started", turnId: "current" })
+    adapter.emit("session-1", { type: "turn_started", turnId: "t1" })
 
     adapter.emit("session-1", { type: "turn_completed", turnId: "stale" })
 
     await expect(service.sendText(second.id, "second")).rejects.toMatchObject({
       code: "turn_conflict",
     })
-    adapter.emit("session-1", { type: "turn_completed", turnId: "current" })
+    adapter.emit("session-1", { type: "turn_completed", turnId: "t1" })
     await expect(service.sendText(second.id, "second")).resolves.toBeUndefined()
   })
 
@@ -342,6 +373,48 @@ describe("ConversationService", () => {
     await expect(service.sendText(first.id, "third")).rejects.toMatchObject({
       code: "turn_conflict",
     })
+  })
+
+  it("releases a matching direct terminal event received before send response", async () => {
+    const { adapter, service } = createHarness()
+    const first = await service.create()
+    const second = await service.create()
+    const pendingSend = deferred()
+    adapter.onSendText = () => pendingSend.promise
+    const firstSend = service.sendText(first.id, "first")
+    await Promise.resolve()
+
+    adapter.emit("session-1", { type: "turn_completed", turnId: "t1" })
+    pendingSend.resolve()
+    await firstSend
+
+    adapter.onSendText = async () => {}
+    await expect(service.sendText(second.id, "second")).resolves.toBeUndefined()
+  })
+
+  it("does not let an old send response overwrite a newer title", async () => {
+    const { adapter, repository, service } = createHarness()
+    const conversation = await service.create()
+    const oldSendResponse = deferred()
+    adapter.onSendText = () => oldSendResponse.promise
+    const oldSend = service.sendText(conversation.id, "old title")
+    await Promise.resolve()
+
+    adapter.emit("session-1", {
+      type: "error",
+      code: "app_server_exited",
+      message: "exited",
+      terminal: true,
+      scope: "session",
+    })
+    adapter.onSendText = async () => {}
+    await service.sendText(conversation.id, "new title")
+    expect(repository.getById(conversation.id)?.title).toBe("new title")
+
+    oldSendResponse.resolve()
+    await oldSend
+
+    expect(repository.getById(conversation.id)?.title).toBe("new title")
   })
 
   it("keeps ownership on non-terminal adapter errors", async () => {
@@ -389,26 +462,26 @@ describe("ConversationService", () => {
     const conversation = await service.create()
     const other = await service.create()
     await service.sendText(conversation.id, "first")
-    adapter.emit("session-1", { type: "turn_started", turnId: "old" })
+    adapter.emit("session-1", { type: "turn_started", turnId: "t1" })
     adapter.emit("session-1", {
       type: "error",
       code: "turn_failed",
       message: "old failed",
       terminal: true,
       scope: "turn",
-      turnId: "old",
+      turnId: "t1",
     })
     await service.sendText(conversation.id, "second")
-    adapter.emit("session-1", { type: "turn_started", turnId: "current" })
+    adapter.emit("session-1", { type: "turn_started", turnId: "t2" })
 
-    adapter.emit("session-1", { type: "turn_started", turnId: "old" })
+    adapter.emit("session-1", { type: "turn_started", turnId: "t1" })
     adapter.emit("session-1", {
       type: "error",
       code: "turn_failed",
       message: "old failed again",
       terminal: true,
       scope: "turn",
-      turnId: "old",
+      turnId: "t1",
     })
 
     expect(repository.getById(conversation.id)?.status).toBe("running")
@@ -421,7 +494,7 @@ describe("ConversationService", () => {
       message: "current failed",
       terminal: true,
       scope: "turn",
-      turnId: "current",
+      turnId: "t2",
     })
     await expect(service.sendText(other.id, "allowed")).resolves.toBeUndefined()
   })
@@ -499,6 +572,7 @@ describe("ConversationService", () => {
     const { adapter, service } = createHarness()
     const owner = await service.create()
     const other = await service.create()
+    await service.sendText(owner.id, "needs approval")
     adapter.emit("session-1", {
       type: "approval_requested",
       request: {

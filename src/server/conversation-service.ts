@@ -18,7 +18,10 @@ const MAX_TITLE_CODE_POINTS = 60
 
 type ActiveTurn = {
   externalSessionId: string
+  operationId: string
   turnId?: string
+  titleCandidate: string
+  titleApplied: boolean
 }
 
 export type ConversationEventSink = {
@@ -97,6 +100,9 @@ export class ConversationService {
 
     const ownership: ActiveTurn = {
       externalSessionId: conversation.externalSessionId,
+      operationId: randomUUID(),
+      titleCandidate: titleFromPrompt(text),
+      titleApplied: false,
     }
     this.#activeTurns.set(conversationId, ownership)
     this.#activeConversationId = conversationId
@@ -106,7 +112,13 @@ export class ConversationService {
       this.#repository.setStatus(conversationId, "running")
       await this.#adapter.resumeSession(conversation.externalSessionId)
       if (this.#activeTurns.get(conversationId) !== ownership) return
-      await this.#adapter.sendText(conversation.externalSessionId, text)
+      const accepted = await this.#adapter.sendText(
+        conversation.externalSessionId,
+        text,
+        ownership.operationId
+      )
+      if (this.#activeTurns.get(conversationId) !== ownership) return
+      this.#acceptActiveTurn(conversationId, ownership, accepted.turnId)
     } catch (error) {
       this.#finishActiveTurn(conversationId, "failed", ownership)
       throw error
@@ -116,9 +128,6 @@ export class ConversationService {
       }
     }
 
-    if (conversation.title === DEFAULT_TITLE) {
-      this.#repository.updateTitle(conversationId, titleFromPrompt(text))
-    }
     if (
       this.#cancellationRequests.get(conversationId) === ownership &&
       this.#activeTurns.get(conversationId) === ownership
@@ -219,33 +228,76 @@ export class ConversationService {
     if (!conversation) return
 
     const ownership = this.#activeTurns.get(conversation.id)
+    if (
+      turnBoundPayload(event.payload) &&
+      (!ownership || event.operationId !== ownership.operationId)
+    ) {
+      return
+    }
     if (event.payload.type === "approval_requested") {
       this.#approvalOwners.set(event.payload.request.id, conversation.id)
     } else if (
-      event.payload.type === "turn_started" &&
-      ownership?.externalSessionId === event.externalSessionId &&
-      (ownership.turnId === undefined || ownership.turnId === event.payload.turnId)
+      event.payload.type === "turn_started" && ownership
     ) {
-      ownership.turnId = event.payload.turnId
+      if (!this.#acceptActiveTurn(conversation.id, ownership, event.payload.turnId)) {
+        return
+      }
+    } else if (event.payload.type === "text_delta" && ownership) {
+      if (!this.#acceptActiveTurn(conversation.id, ownership, event.payload.turnId)) {
+        return
+      }
     } else if (
-      event.payload.type === "turn_completed" &&
-      terminalEventOwnsTurn(ownership, event.externalSessionId, event.payload.turnId)
+      event.payload.type === "turn_completed" && ownership
     ) {
+      if (!this.#acceptActiveTurn(conversation.id, ownership, event.payload.turnId)) {
+        return
+      }
       this.#finishActiveTurn(conversation.id, "idle", ownership)
     } else if (
-      event.payload.type === "turn_interrupted" &&
-      terminalEventOwnsTurn(ownership, event.externalSessionId, event.payload.turnId)
+      event.payload.type === "turn_interrupted" && ownership
     ) {
+      if (!this.#acceptActiveTurn(conversation.id, ownership, event.payload.turnId)) {
+        return
+      }
       this.#finishActiveTurn(conversation.id, "interrupted", ownership)
     } else if (
       event.payload.type === "error" &&
       event.payload.terminal &&
-      terminalErrorOwnsTurn(ownership, event.externalSessionId, event.payload)
+      event.payload.scope === "turn" &&
+      ownership
+    ) {
+      if (!this.#acceptActiveTurn(conversation.id, ownership, event.payload.turnId)) {
+        return
+      }
+      this.#finishActiveTurn(conversation.id, "failed", ownership)
+    } else if (
+      event.payload.type === "error" &&
+      event.payload.terminal &&
+      event.payload.scope === "session" &&
+      ownership?.externalSessionId === event.externalSessionId
     ) {
       this.#finishActiveTurn(conversation.id, "failed", ownership)
     }
 
     this.#eventSink.publish(conversation.id, event.payload)
+  }
+
+  #acceptActiveTurn(
+    conversationId: string,
+    ownership: ActiveTurn,
+    turnId: string
+  ): boolean {
+    if (this.#activeTurns.get(conversationId) !== ownership) return false
+    if (ownership.turnId !== undefined && ownership.turnId !== turnId) return false
+    ownership.turnId = turnId
+    if (!ownership.titleApplied) {
+      const conversation = this.#repository.getById(conversationId)
+      if (conversation?.title === DEFAULT_TITLE) {
+        this.#repository.updateTitle(conversationId, ownership.titleCandidate)
+      }
+      ownership.titleApplied = true
+    }
+    return true
   }
 
   #finishActiveTurn(
@@ -306,22 +358,14 @@ function titleFromPrompt(text: string): string {
   return [...collapsed].slice(0, MAX_TITLE_CODE_POINTS).join("")
 }
 
-function terminalEventOwnsTurn(
-  ownership: ActiveTurn | undefined,
-  externalSessionId: string,
-  turnId: string
-): ownership is ActiveTurn {
+function turnBoundPayload(payload: ConversationEvent): boolean {
   return (
-    ownership?.externalSessionId === externalSessionId &&
-    ownership.turnId === turnId
+    payload.type === "turn_started" ||
+    payload.type === "text_delta" ||
+    payload.type === "tool_status" ||
+    payload.type === "approval_requested" ||
+    payload.type === "turn_completed" ||
+    payload.type === "turn_interrupted" ||
+    (payload.type === "error" && payload.terminal && payload.scope === "turn")
   )
-}
-
-function terminalErrorOwnsTurn(
-  ownership: ActiveTurn | undefined,
-  externalSessionId: string,
-  error: Extract<ConversationEvent, { type: "error"; terminal: true }>
-): ownership is ActiveTurn {
-  if (ownership?.externalSessionId !== externalSessionId) return false
-  return error.scope === "session" || ownership.turnId === error.turnId
 }

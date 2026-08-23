@@ -25,6 +25,20 @@ function deferred(): {
   return { promise, resolve, reject }
 }
 
+function deferredValue<T>(): {
+  promise: Promise<T>
+  resolve: (value: T) => void
+  reject: (error: unknown) => void
+} {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 class FakeCodexClient {
   readonly requests: RequestCall[] = []
   readonly responses: ResponseCall[] = []
@@ -70,8 +84,14 @@ function setup(): {
   return { adapter, events, fake }
 }
 
-function event(externalSessionId: string, payload: ConversationEvent): AgentAdapterEvent {
-  return { externalSessionId, payload }
+function event(
+  externalSessionId: string,
+  payload: ConversationEvent,
+  operationId?: string
+): AgentAdapterEvent {
+  return operationId === undefined
+    ? { externalSessionId, payload }
+    : { externalSessionId, operationId, payload }
 }
 
 function notification(method: string, params: unknown): CodexJsonRpcClientEvent {
@@ -107,8 +127,10 @@ function fileItem(id: string, status: string) {
 }
 
 describe("CodexAppServerAdapter", () => {
-  it("normalizes streamed text and compact command status", () => {
-    const { events, fake } = setup()
+  it("normalizes streamed text and compact command status", async () => {
+    const { adapter, events, fake } = setup()
+    fake.enqueue("turn/start", { turn: { id: "turn_1" } })
+    await adapter.sendText("thr_1", "seed", "operation-1")
 
     fake.emit(agentDelta("thr_1", "turn_1", "hel"))
     fake.emit(agentDelta("thr_1", "turn_1", "lo"))
@@ -128,16 +150,16 @@ describe("CodexAppServerAdapter", () => {
     )
 
     expect(events).toEqual([
-      event("thr_1", { type: "text_delta", turnId: "turn_1", text: "hel" }),
-      event("thr_1", { type: "text_delta", turnId: "turn_1", text: "lo" }),
+      event("thr_1", { type: "text_delta", turnId: "turn_1", text: "hel" }, "operation-1"),
+      event("thr_1", { type: "text_delta", turnId: "turn_1", text: "lo" }, "operation-1"),
       event("thr_1", {
         type: "tool_status",
         tool: { id: "item_1", label: "运行命令", status: "running" },
-      }),
+      }, "operation-1"),
       event("thr_1", {
         type: "tool_status",
         tool: { id: "item_1", label: "运行命令", status: "completed" },
-      }),
+      }, "operation-1"),
     ])
   })
 
@@ -236,7 +258,7 @@ describe("CodexAppServerAdapter", () => {
     fake.enqueue("turn/start", { turn: { id: "turn_1" } })
     fake.enqueue("turn/interrupt", {})
 
-    await adapter.sendText("thr_1", "hello")
+    await adapter.sendText("thr_1", "hello", "operation-1")
     fake.emit(
       notification("turn/started", {
         threadId: "thr_1",
@@ -259,14 +281,75 @@ describe("CodexAppServerAdapter", () => {
       },
     ])
     expect(events).toEqual([
-      event("thr_1", { type: "turn_started", turnId: "turn_1" }),
+      event("thr_1", { type: "turn_started", turnId: "turn_1" }, "operation-1"),
     ])
+  })
+
+  it("buffers a direct terminal notification until its start response is correlated", async () => {
+    const { adapter, events, fake } = setup()
+    const startResponse = deferredValue<{ turn: { id: string } }>()
+    fake.enqueue("turn/start", startResponse.promise)
+    const sending = adapter.sendText("thr_1", "hello", "operation-1")
+    await Promise.resolve()
+
+    fake.emit(
+      notification("turn/completed", {
+        threadId: "thr_1",
+        turn: { id: "turn_1", status: "failed", items: [] },
+      })
+    )
+    expect(events).toEqual([])
+
+    startResponse.resolve({ turn: { id: "turn_1" } })
+    await expect(sending).resolves.toEqual({ turnId: "turn_1" })
+    expect(events).toEqual([
+      event(
+        "thr_1",
+        {
+          type: "error",
+          code: "turn_failed",
+          message: "Agent turn failed.",
+          terminal: true,
+          scope: "turn",
+          turnId: "turn_1",
+        },
+        "operation-1"
+      ),
+    ])
+  })
+
+  it("does not let an old start response or started event replace newer active state", async () => {
+    const { adapter, fake } = setup()
+    const oldStartResponse = deferredValue<{ turn: { id: string } }>()
+    fake.enqueue("turn/start", oldStartResponse.promise)
+    const oldSend = adapter.sendText("thr_1", "old", "operation-old")
+    await Promise.resolve()
+
+    fake.emit({ type: "exit", code: 17, signal: null, stderr: "" })
+    fake.enqueue("turn/start", { turn: { id: "turn-new" } })
+    await adapter.sendText("thr_1", "new", "operation-new")
+
+    oldStartResponse.resolve({ turn: { id: "turn-old" } })
+    await oldSend
+    fake.emit(
+      notification("turn/started", {
+        threadId: "thr_1",
+        turn: { id: "turn-old", status: "inProgress", items: [] },
+      })
+    )
+    fake.enqueue("turn/interrupt", {})
+    await adapter.cancelTurn("thr_1")
+
+    expect(fake.requests.at(-1)).toEqual({
+      method: "turn/interrupt",
+      params: { threadId: "thr_1", turnId: "turn-new" },
+    })
   })
 
   it("does not let an old interrupt rejection clear a newer turn marker", async () => {
     const { adapter, fake } = setup()
     fake.enqueue("turn/start", { turn: { id: "turn_1" } })
-    await adapter.sendText("thr_1", "first")
+    await adapter.sendText("thr_1", "first", "operation-1")
     const oldInterrupt = deferred()
     fake.enqueue("turn/interrupt", oldInterrupt.promise)
     const firstCancel = adapter.cancelTurn("thr_1")
@@ -279,7 +362,7 @@ describe("CodexAppServerAdapter", () => {
       })
     )
     fake.enqueue("turn/start", { turn: { id: "turn_2" } })
-    await adapter.sendText("thr_1", "second")
+    await adapter.sendText("thr_1", "second", "operation-2")
     const currentInterrupt = deferred()
     fake.enqueue("turn/interrupt", currentInterrupt.promise)
     fake.enqueue("turn/interrupt", currentInterrupt.promise)
@@ -305,8 +388,39 @@ describe("CodexAppServerAdapter", () => {
     ])
   })
 
-  it("normalizes failed and declined tools and terminal turn statuses", () => {
-    const { events, fake } = setup()
+  it("does not redispatch cancellation after a duplicate started notification", async () => {
+    const { adapter, fake } = setup()
+    fake.enqueue("turn/start", { turn: { id: "turn_1" } })
+    await adapter.sendText("thr_1", "hello", "operation-1")
+    const interrupt = deferred()
+    fake.enqueue("turn/interrupt", interrupt.promise)
+
+    const firstCancel = adapter.cancelTurn("thr_1")
+    await Promise.resolve()
+    fake.emit(
+      notification("turn/started", {
+        threadId: "thr_1",
+        turn: { id: "turn_1", status: "inProgress", items: [] },
+      })
+    )
+    await adapter.cancelTurn("thr_1")
+
+    interrupt.resolve()
+    await firstCancel
+    expect(fake.requests.filter(({ method }) => method === "turn/interrupt")).toEqual([
+      {
+        method: "turn/interrupt",
+        params: { threadId: "thr_1", turnId: "turn_1" },
+      },
+    ])
+  })
+
+  it("normalizes failed and declined tools and terminal turn statuses", async () => {
+    const { adapter, events, fake } = setup()
+    fake.enqueue("turn/start", { turn: { id: "turn_1" } })
+    await adapter.sendText("thr_1", "seed 1", "operation-1")
+    fake.enqueue("turn/start", { turn: { id: "turn_2" } })
+    await adapter.sendText("thr_2", "seed 2", "operation-2")
 
     fake.emit(
       notification("item/completed", {
@@ -346,26 +460,30 @@ describe("CodexAppServerAdapter", () => {
       event("thr_1", {
         type: "tool_status",
         tool: { id: "command_failed", label: "运行命令", status: "failed" },
-      }),
+      }, "operation-1"),
       event("thr_1", {
         type: "tool_status",
         tool: { id: "file_declined", label: "修改文件", status: "declined" },
-      }),
+      }, "operation-1"),
       event("thr_1", {
         type: "tool_status",
         tool: { id: "file_running", label: "修改文件", status: "running" },
-      }),
+      }, "operation-1"),
       event("thr_1", {
         type: "tool_status",
         tool: { id: "file_running", label: "修改文件", status: "failed" },
-      }),
-      event("thr_1", { type: "turn_completed", turnId: "turn_1" }),
-      event("thr_2", { type: "turn_interrupted", turnId: "turn_2" }),
+      }, "operation-1"),
+      event("thr_1", { type: "turn_completed", turnId: "turn_1" }, "operation-1"),
+      event("thr_2", { type: "turn_interrupted", turnId: "turn_2" }, "operation-2"),
     ])
   })
 
-  it("emits sanitized errors for failed and unsupported terminal turn statuses", () => {
-    const { events, fake } = setup()
+  it("emits sanitized errors for failed and unsupported terminal turn statuses", async () => {
+    const { adapter, events, fake } = setup()
+    fake.enqueue("turn/start", { turn: { id: "turn_failed" } })
+    await adapter.sendText("thr_failed", "seed failed", "operation-failed")
+    fake.enqueue("turn/start", { turn: { id: "turn_unknown" } })
+    await adapter.sendText("thr_unknown", "seed unknown", "operation-unknown")
 
     fake.emit(
       notification("turn/completed", {
@@ -398,7 +516,7 @@ describe("CodexAppServerAdapter", () => {
         terminal: true,
         scope: "turn",
         turnId: "turn_failed",
-      }),
+      }, "operation-failed"),
       event("thr_unknown", {
         type: "error",
         code: "unsupported_turn_status",
@@ -406,7 +524,7 @@ describe("CodexAppServerAdapter", () => {
         terminal: true,
         scope: "turn",
         turnId: "turn_unknown",
-      }),
+      }, "operation-unknown"),
     ])
   })
 
@@ -414,6 +532,8 @@ describe("CodexAppServerAdapter", () => {
     const { adapter, events, fake } = setup()
 
     for (const suffix of ["1", "2"]) {
+      fake.enqueue("turn/start", { turn: { id: `turn_${suffix}` } })
+      await adapter.sendText(`thr_${suffix}`, "seed", `operation-${suffix}`)
       fake.emit(
         notification("turn/started", {
           threadId: `thr_${suffix}`,
@@ -439,6 +559,7 @@ describe("CodexAppServerAdapter", () => {
       })
     }
     events.length = 0
+    fake.requests.length = 0
 
     fake.emit({
       type: "exit",
@@ -481,13 +602,13 @@ describe("CodexAppServerAdapter", () => {
         turn: { id: "turn_1", status: "completed", items: [] },
       })
     )
-    expect(events).toEqual([
-      event("thr_1", { type: "turn_completed", turnId: "turn_1" }),
-    ])
+    expect(events).toEqual([])
   })
 
   it("fails an active session with a sanitized protocol error", async () => {
     const { adapter, events, fake } = setup()
+    fake.enqueue("turn/start", { turn: { id: "turn_1" } })
+    await adapter.sendText("thr_1", "seed", "operation-1")
 
     fake.emit(
       notification("turn/started", {
@@ -502,6 +623,7 @@ describe("CodexAppServerAdapter", () => {
       params: { threadId: "thr_1", turnId: "turn_1", itemId: "file_1" },
     })
     events.length = 0
+    fake.requests.length = 0
 
     fake.emit({
       type: "protocol_error",
@@ -528,6 +650,8 @@ describe("CodexAppServerAdapter", () => {
 
   it("normalizes command and file approvals without exposing raw details", async () => {
     const { adapter, events, fake } = setup()
+    fake.enqueue("turn/start", { turn: { id: "turn_1" } })
+    await adapter.sendText("thr_1", "seed", "operation-1")
 
     fake.emit({
       type: "server_request",
@@ -557,11 +681,11 @@ describe("CodexAppServerAdapter", () => {
       event("thr_1", {
         type: "approval_requested",
         request: { id: "approval_1", kind: "command", label: "运行命令" },
-      }),
+      }, "operation-1"),
       event("thr_1", {
         type: "approval_requested",
         request: { id: "approval_2", kind: "file_change", label: "修改文件" },
-      }),
+      }, "operation-1"),
     ])
 
     await adapter.respondToApproval("approval_1", "accept")
