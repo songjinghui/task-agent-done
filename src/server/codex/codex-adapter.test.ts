@@ -339,11 +339,13 @@ describe("CodexAppServerAdapter", () => {
         type: "error",
         code: "turn_failed",
         message: "Agent turn failed.",
+        terminal: true,
       }),
       event("thr_unknown", {
         type: "error",
         code: "unsupported_turn_status",
         message: "Agent turn ended with an unsupported status.",
+        terminal: true,
       }),
     ])
   })
@@ -390,11 +392,13 @@ describe("CodexAppServerAdapter", () => {
         type: "error",
         code: "app_server_exited",
         message: "Agent server exited unexpectedly.",
+        terminal: true,
       }),
       event("thr_2", {
         type: "error",
         code: "app_server_exited",
         message: "Agent server exited unexpectedly.",
+        terminal: true,
       }),
     ])
     expect(JSON.stringify(events)).not.toContain("private transport stderr")
@@ -448,6 +452,7 @@ describe("CodexAppServerAdapter", () => {
         type: "error",
         code: "app_server_protocol_error",
         message: "Agent server protocol error.",
+        terminal: true,
       }),
     ])
     expect(JSON.stringify(events)).not.toContain("private malformed provider payload")
@@ -529,6 +534,7 @@ describe("CodexAppServerAdapter", () => {
         type: "error",
         code: "unsupported_interaction",
         message: "Agent requested an unsupported interaction.",
+        terminal: false,
       }),
     ])
   })

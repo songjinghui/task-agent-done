@@ -52,8 +52,8 @@ export class ConversationService {
   readonly #eventSink: ConversationEventSink
   readonly #workspace: string
   readonly #activeTurns = new Map<string, ActiveTurn>()
-  readonly #pendingTurnStarts = new Set<string>()
-  readonly #cancellationRequests = new Set<string>()
+  readonly #pendingTurnStarts = new Map<string, ActiveTurn>()
+  readonly #cancellationRequests = new Map<string, ActiveTurn>()
   readonly #approvalOwners = new Map<string, string>()
   #activeConversationId: string | null = null
 
@@ -100,7 +100,7 @@ export class ConversationService {
     }
     this.#activeTurns.set(conversationId, ownership)
     this.#activeConversationId = conversationId
-    this.#pendingTurnStarts.add(conversationId)
+    this.#pendingTurnStarts.set(conversationId, ownership)
 
     try {
       this.#repository.setStatus(conversationId, "running")
@@ -110,14 +110,16 @@ export class ConversationService {
       this.#finishActiveTurn(conversationId, "failed", ownership)
       throw error
     } finally {
-      this.#pendingTurnStarts.delete(conversationId)
+      if (this.#pendingTurnStarts.get(conversationId) === ownership) {
+        this.#pendingTurnStarts.delete(conversationId)
+      }
     }
 
     if (conversation.title === DEFAULT_TITLE) {
       this.#repository.updateTitle(conversationId, titleFromPrompt(text))
     }
     if (
-      this.#cancellationRequests.has(conversationId) &&
+      this.#cancellationRequests.get(conversationId) === ownership &&
       this.#activeTurns.get(conversationId) === ownership
     ) {
       await this.#dispatchCancellation(conversationId, ownership)
@@ -181,9 +183,9 @@ export class ConversationService {
     conversationId: string,
     ownership: ActiveTurn
   ): Promise<void> {
-    if (this.#cancellationRequests.has(conversationId)) return
-    this.#cancellationRequests.add(conversationId)
-    if (this.#pendingTurnStarts.has(conversationId)) return
+    if (this.#cancellationRequests.get(conversationId) === ownership) return
+    this.#cancellationRequests.set(conversationId, ownership)
+    if (this.#pendingTurnStarts.get(conversationId) === ownership) return
     await this.#dispatchCancellation(conversationId, ownership)
   }
 
@@ -194,12 +196,17 @@ export class ConversationService {
     try {
       await this.#adapter.cancelTurn(ownership.externalSessionId)
     } catch (error) {
-      this.#cancellationRequests.delete(conversationId)
-      this.#eventSink.publish(conversationId, {
-        type: "error",
-        code: "turn_cancel_failed",
-        message: "Failed to cancel the active turn.",
-      })
+      if (this.#activeTurns.get(conversationId) === ownership) {
+        if (this.#cancellationRequests.get(conversationId) === ownership) {
+          this.#cancellationRequests.delete(conversationId)
+        }
+        this.#eventSink.publish(conversationId, {
+          type: "error",
+          code: "turn_cancel_failed",
+          message: "Failed to cancel the active turn.",
+          terminal: false,
+        })
+      }
       throw error
     }
   }
@@ -230,6 +237,7 @@ export class ConversationService {
       this.#finishActiveTurn(conversation.id, "interrupted", ownership)
     } else if (
       event.payload.type === "error" &&
+      event.payload.terminal &&
       ownership?.externalSessionId === event.externalSessionId
     ) {
       this.#finishActiveTurn(conversation.id, "failed", ownership)
@@ -249,7 +257,9 @@ export class ConversationService {
       this.#repository.setStatus(conversationId, status)
     } finally {
       this.#activeTurns.delete(conversationId)
-      this.#cancellationRequests.delete(conversationId)
+      if (this.#cancellationRequests.get(conversationId) === expectedOwnership) {
+        this.#cancellationRequests.delete(conversationId)
+      }
       this.#clearApprovalOwners(conversationId)
       if (this.#activeConversationId === conversationId) {
         this.#activeConversationId = null

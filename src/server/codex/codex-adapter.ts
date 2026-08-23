@@ -275,6 +275,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         status === "failed"
           ? "Agent turn failed."
           : "Agent turn ended with an unsupported status.",
+      terminal: true,
     })
   }
 
@@ -286,7 +287,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.#pendingApprovals.clear()
 
     for (const externalSessionId of affectedSessions) {
-      this.#emit(externalSessionId, { type: "error", code, message })
+      this.#emit(externalSessionId, {
+        type: "error",
+        code,
+        message,
+        terminal: true,
+      })
     }
   }
 
@@ -299,6 +305,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         type: "error",
         code: "unsupported_interaction",
         message: "Agent requested an unsupported interaction.",
+        terminal: false,
       })
       return
     }

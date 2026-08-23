@@ -41,7 +41,7 @@ export type ConversationEvent =
   | { type: "approval_requested"; request: ApprovalRequest }
   | { type: "turn_completed"; turnId: string }
   | { type: "turn_interrupted"; turnId: string }
-  | { type: "error"; code: string; message: string }
+  | { type: "error"; code: string; message: string; terminal: boolean }
 
 export type ConversationEventEnvelope = {
   conversationId: string

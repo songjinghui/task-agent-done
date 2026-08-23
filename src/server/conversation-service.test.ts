@@ -270,7 +270,12 @@ describe("ConversationService", () => {
     ],
     [
       "adapter error",
-      { type: "error", code: "app_server_exited", message: "exited" } as const,
+      {
+        type: "error",
+        code: "app_server_exited",
+        message: "exited",
+        terminal: true,
+      } as const,
       "failed",
     ],
   ])("releases the global lock on %s", async (_label, payload, status) => {
@@ -298,6 +303,43 @@ describe("ConversationService", () => {
       code: "turn_conflict",
     })
     adapter.emit("session-1", { type: "turn_completed", turnId: "current" })
+    await expect(service.sendText(second.id, "second")).resolves.toBeUndefined()
+  })
+
+  it("keeps ownership on non-terminal adapter errors", async () => {
+    const { adapter, eventSink, repository, service } = createHarness()
+    const first = await service.create()
+    const second = await service.create()
+    await service.sendText(first.id, "first")
+
+    adapter.emit("session-1", {
+      type: "error",
+      code: "unsupported_interaction",
+      message: "unsupported",
+      terminal: false,
+    })
+
+    expect(repository.getById(first.id)?.status).toBe("running")
+    expect(eventSink.events.at(-1)).toEqual({
+      conversationId: first.id,
+      payload: {
+        type: "error",
+        code: "unsupported_interaction",
+        message: "unsupported",
+        terminal: false,
+      },
+    })
+    await expect(service.sendText(second.id, "second")).rejects.toMatchObject({
+      code: "turn_conflict",
+    })
+
+    adapter.emit("session-1", {
+      type: "error",
+      code: "turn_failed",
+      message: "failed",
+      terminal: true,
+    })
+    expect(repository.getById(first.id)?.status).toBe("failed")
     await expect(service.sendText(second.id, "second")).resolves.toBeUndefined()
   })
 
@@ -457,6 +499,7 @@ describe("ConversationService", () => {
           type: "error",
           code: "turn_cancel_failed",
           message: "Failed to cancel the active turn.",
+          terminal: false,
         },
       },
     ])
@@ -468,6 +511,41 @@ describe("ConversationService", () => {
     await expect(service.sendText(second.id, "second")).resolves.toBeUndefined()
   })
 
+  it("does not let a stale cancellation rejection clear newer turn state", async () => {
+    const { adapter, eventSink, service } = createHarness()
+    const conversation = await service.create()
+    await service.sendText(conversation.id, "first")
+    const oldCancellation = deferred()
+    adapter.onCancelTurn = () => oldCancellation.promise
+    const firstCancel = service.cancel(conversation.id)
+    await Promise.resolve()
+
+    adapter.emit("session-1", { type: "turn_interrupted", turnId: "t1" })
+    await service.sendText(conversation.id, "second")
+    const currentCancellation = deferred()
+    adapter.onCancelTurn = () => currentCancellation.promise
+    const secondCancel = service.cancel(conversation.id)
+    await Promise.resolve()
+
+    oldCancellation.reject(new Error("old cancel failed"))
+    await expect(firstCancel).rejects.toThrow("old cancel failed")
+    const duplicateCancel = service.cancel(conversation.id)
+    await Promise.resolve()
+    currentCancellation.resolve()
+    await Promise.all([secondCancel, duplicateCancel])
+
+    expect(adapter.cancelTurnCalls).toEqual(["session-1", "session-1"])
+    expect(eventSink.events).not.toContainEqual({
+      conversationId: conversation.id,
+      payload: {
+        type: "error",
+        code: "turn_cancel_failed",
+        message: "Failed to cancel the active turn.",
+        terminal: false,
+      },
+    })
+  })
+
   it("ignores adapter events for sessions outside the repository", () => {
     const { adapter, eventSink } = createHarness()
 
@@ -475,6 +553,7 @@ describe("ConversationService", () => {
       type: "error",
       code: "app_server_exited",
       message: "exited",
+      terminal: true,
     })
 
     expect(eventSink.events).toEqual([])
