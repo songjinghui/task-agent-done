@@ -1,0 +1,143 @@
+import { describe, expect, it, vi } from "vitest"
+import type { ConversationSummary } from "../shared/contracts.js"
+import { createTaskMuxApi, TaskMuxApiError } from "./api.js"
+
+const summary: ConversationSummary = {
+  id: "conversation / 1",
+  title: "修复 README 测试",
+  status: "idle",
+  createdAt: "2026-08-23T08:00:00.000Z",
+  updatedAt: "2026-08-23T08:01:00.000Z",
+}
+
+describe("TaskMux API", () => {
+  it("maps the workspace and conversation REST routes to typed results", async () => {
+    const responses = [
+      jsonResponse({ status: "ok" }),
+      jsonResponse({ workspace: "/work/taskmux" }),
+      jsonResponse([summary]),
+      jsonResponse(summary, 201),
+      jsonResponse({
+        conversationId: summary.id,
+        turns: [
+          {
+            id: "turn-1",
+            role: "assistant",
+            text: "历史回答",
+            status: "completed",
+          },
+        ],
+      }),
+      jsonResponse({ accepted: true }, 202),
+      new Response(null, { status: 204 }),
+      new Response(null, { status: 204 }),
+    ]
+    const fetcher = vi.fn<typeof fetch>(async () => responses.shift()!)
+    const api = createTaskMuxApi(fetcher)
+
+    await expect(api.getHealth()).resolves.toEqual({ status: "ok" })
+    await expect(api.getWorkspace()).resolves.toEqual({
+      workspace: "/work/taskmux",
+    })
+    await expect(api.listConversations()).resolves.toEqual([summary])
+    await expect(api.createConversation()).resolves.toEqual(summary)
+    await expect(api.getConversation(summary.id)).resolves.toEqual({
+      conversationId: summary.id,
+      turns: [
+        {
+          id: "turn-1",
+          role: "assistant",
+          text: "历史回答",
+          status: "completed",
+        },
+      ],
+    })
+    await expect(api.sendMessage(summary.id, "hello\nworld")).resolves.toEqual({
+      accepted: true,
+    })
+    await expect(api.cancelConversation(summary.id)).resolves.toBeUndefined()
+    await expect(
+      api.respondToApproval(summary.id, "approval / 1", "decline")
+    ).resolves.toBeUndefined()
+
+    expect(fetcher.mock.calls).toEqual([
+      ["/api/health", undefined],
+      ["/api/workspace", undefined],
+      ["/api/conversations", undefined],
+      ["/api/conversations", { method: "POST" }],
+      ["/api/conversations/conversation%20%2F%201", undefined],
+      [
+        "/api/conversations/conversation%20%2F%201/messages",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: "hello\nworld" }),
+        },
+      ],
+      [
+        "/api/conversations/conversation%20%2F%201/cancel",
+        { method: "POST" },
+      ],
+      [
+        "/api/conversations/conversation%20%2F%201/approvals/approval%20%2F%201",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ decision: "decline" }),
+        },
+      ],
+    ])
+  })
+
+  it("normalizes a structured non-success response", async () => {
+    const api = createTaskMuxApi(
+      vi.fn<typeof fetch>(async () =>
+        jsonResponse(
+          {
+            error: {
+              code: "conversation_not_found",
+              message: "Conversation does not exist.",
+            },
+          },
+          404
+        )
+      )
+    )
+
+    const error = await api.getConversation("missing").catch((value) => value)
+
+    expect(error).toBeInstanceOf(TaskMuxApiError)
+    expect(error).toMatchObject({
+      code: "conversation_not_found",
+      message: "Conversation does not exist.",
+      status: 404,
+    })
+  })
+
+  it.each([
+    new Response("not-json", {
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+    }),
+    jsonResponse({ error: { code: 17, message: null } }, 503),
+    jsonResponse({ error: { code: "", message: "   " } }, 503),
+  ])("uses a safe fallback for a malformed error response", async (response) => {
+    const api = createTaskMuxApi(vi.fn<typeof fetch>(async () => response))
+
+    const error = await api.listConversations().catch((value) => value)
+
+    expect(error).toBeInstanceOf(TaskMuxApiError)
+    expect(error).toMatchObject({
+      code: "request_failed",
+      message: "Request failed with status 503.",
+      status: 503,
+    })
+  })
+})
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  })
+}
