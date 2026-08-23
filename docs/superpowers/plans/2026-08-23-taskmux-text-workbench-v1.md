@@ -77,38 +77,14 @@ README.md                             setup, run, test, limitations
 - Create: `src/server/config.test.ts`
 - Create: `src/server/data-dir.ts`
 - Create: `src/server/data-dir.test.ts`
-- Create: `.gitignore`
+- Modify: `.gitignore`
 
 **Interfaces:**
 - Produces: `parseServerConfig(argv, env): ServerConfig`
 - Produces: `resolveDataDir(env, platform, homeDir): string`
 - `ServerConfig = { workspace: string; host: "127.0.0.1"; port: number; dataDir: string; dev: boolean }`
 
-- [ ] **Step 1: Write failing configuration tests**
-
-```ts
-it("normalizes one absolute workspace", () => {
-  expect(parseServerConfig(["--workspace", fixtureDir], {})).toMatchObject({
-    workspace: realpathSync(fixtureDir),
-    host: "127.0.0.1",
-  })
-})
-
-it("rejects a missing or relative workspace", () => {
-  expect(() => parseServerConfig([], {})).toThrow("--workspace is required")
-  expect(() => parseServerConfig(["--workspace", "relative"], {})).toThrow(
-    "Workspace must be an absolute path"
-  )
-})
-```
-
-- [ ] **Step 2: Run the focused tests and confirm Red**
-
-Run: `pnpm vitest run src/server/config.test.ts src/server/data-dir.test.ts`
-
-Expected: FAIL because the modules do not exist.
-
-- [ ] **Step 3: Add the minimal project configuration and dependencies**
+- [ ] **Step 1: Bootstrap the test runner and project configuration**
 
 Use `pnpm add fastify @fastify/static @fastify/middie react react-dom` and
 `pnpm add -D typescript vite @vitejs/plugin-react tsx vitest jsdom @types/node @types/react @types/react-dom @testing-library/react @testing-library/jest-dom @testing-library/user-event @playwright/test`.
@@ -133,6 +109,33 @@ Set scripts exactly:
 
 Configure Vite with `build.outDir = "dist/client"`. Configure the server
 TypeScript build with `rootDir = "src"` and `outDir = "dist-server"`.
+Extend the existing `.gitignore` with Node, build, test, database, and local
+environment artifacts while retaining `.worktrees/`.
+
+- [ ] **Step 2: Write failing configuration tests**
+
+```ts
+it("normalizes one absolute workspace", () => {
+  expect(parseServerConfig(["--workspace", fixtureDir], {})).toMatchObject({
+    workspace: realpathSync(fixtureDir),
+    host: "127.0.0.1",
+  })
+})
+
+it("rejects a missing or relative workspace", () => {
+  expect(() => parseServerConfig([], {})).toThrow("--workspace is required")
+  expect(() => parseServerConfig(["--workspace", "relative"], {})).toThrow(
+    "Workspace must be an absolute path"
+  )
+})
+```
+
+- [ ] **Step 3: Run the focused tests and confirm Red**
+
+Run: `pnpm vitest run src/server/config.test.ts src/server/data-dir.test.ts`
+
+Expected: FAIL because `config.ts` and `data-dir.ts` do not exist, while the
+test runner itself starts successfully.
 
 - [ ] **Step 4: Implement configuration and data-directory resolution**
 
