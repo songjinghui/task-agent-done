@@ -20,6 +20,11 @@ function createDatabasePath(): string {
 }
 
 describe("openDatabase", () => {
+  it("runs SQLite tests with only the experimental warning category suppressed", () => {
+    expect(process.execArgv).toContain("--disable-warning=ExperimentalWarning")
+    expect(process.execArgv).not.toContain("--no-warnings")
+  })
+
   it("applies the initial migration only once and enables required pragmas", () => {
     const path = createDatabasePath()
     const first = openDatabase(path)
