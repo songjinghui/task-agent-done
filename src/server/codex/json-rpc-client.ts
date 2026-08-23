@@ -53,7 +53,7 @@ export class CodexJsonRpcClient {
     this.#attachProcessListeners(this.#child)
 
     try {
-      const initializeResult = await this.request<unknown>("initialize", {
+      const initializeResult = await this.#request<unknown>("initialize", {
         clientInfo,
       })
       if (!isRecord(initializeResult)) {
@@ -70,9 +70,17 @@ export class CodexJsonRpcClient {
   }
 
   request<T>(method: string, params?: unknown, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promise<T> {
-    if (this.#state !== "starting" && this.#state !== "started") {
+    if (this.#state !== "started") {
       return Promise.reject(new Error("app_server_not_started"))
     }
+    return this.#request(method, params, timeoutMs)
+  }
+
+  #request<T>(
+    method: string,
+    params?: unknown,
+    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
+  ): Promise<T> {
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
       return Promise.reject(new Error("invalid_request_timeout"))
     }
@@ -144,6 +152,10 @@ export class CodexJsonRpcClient {
       this.#rejectPending(new Error("app_server_exited"))
     })
     child.once("exit", (code, signal) => {
+      this.#state = "stopped"
+      this.#rejectPending(new Error("app_server_exited"))
+    })
+    child.once("close", (code, signal) => {
       this.#state = "stopped"
       this.#rejectPending(new Error("app_server_exited"))
       this.#emit({ type: "exit", code, signal, stderr: this.#stderr })

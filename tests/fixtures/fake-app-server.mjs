@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process"
 import readline from "node:readline"
 
 let initialized = false
@@ -5,16 +6,30 @@ let nextThread = 1
 let nextTurn = 1
 const turns = new Map()
 const approvalRequests = new Map()
+let splitOutput = false
+const queuedOutput = []
 
 function send(message) {
-  process.stdout.write(`${JSON.stringify(message)}\n`)
+  const serialized = `${JSON.stringify(message)}\n`
+  if (splitOutput) {
+    queuedOutput.push(serialized)
+    return
+  }
+  process.stdout.write(serialized)
 }
 
 function sendSplit(message) {
   const serialized = `${JSON.stringify(message)}\n`
   const middle = Math.ceil(serialized.length / 2)
+  splitOutput = true
   process.stdout.write(serialized.slice(0, middle))
-  setTimeout(() => process.stdout.write(serialized.slice(middle)), 0)
+  setTimeout(() => {
+    process.stdout.write(serialized.slice(middle))
+    splitOutput = false
+    for (const queued of queuedOutput.splice(0)) {
+      process.stdout.write(queued)
+    }
+  }, 0)
 }
 
 function respond(id, result) {
@@ -59,6 +74,17 @@ function requestApproval(turn, method) {
 }
 
 function driveTurn(turn) {
+  if (turn.prompt.includes("[crash-stderr]")) {
+    spawn(
+      process.execPath,
+      [
+        "-e",
+        'setTimeout(() => process.stderr.write("fake app-server trailing diagnostic\\n"), 40)',
+      ],
+      { stdio: ["ignore", "ignore", process.stderr] }
+    )
+    process.exit(17)
+  }
   if (turn.prompt.includes("[crash]")) {
     process.exit(17)
   }
@@ -110,7 +136,6 @@ function driveTurn(turn) {
 
 function handleRequest(message) {
   if (message.method === "initialize") {
-    initialized = true
     sendSplit({
       jsonrpc: "2.0",
       id: message.id,
@@ -138,7 +163,7 @@ function handleRequest(message) {
       completed: false,
     }
     turns.set(turn.id, turn)
-    if (turn.prompt.includes("[crash]")) {
+    if (turn.prompt.includes("[crash]") || turn.prompt.includes("[crash-stderr]")) {
       driveTurn(turn)
       return
     }
@@ -180,6 +205,7 @@ input.on("line", (line) => {
   if (message?.jsonrpc !== "2.0") return
   if (typeof message.method === "string") {
     if (Object.hasOwn(message, "id")) handleRequest(message)
+    if (message.method === "initialized") initialized = true
     return
   }
   if (Object.hasOwn(message ?? {}, "id")) handleResponse(message)

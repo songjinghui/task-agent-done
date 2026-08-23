@@ -73,6 +73,18 @@ describe("CodexJsonRpcClient", () => {
     expect(second.thread.id).toBe("thr_2")
   })
 
+  it("does not send application requests before initialized is sent", async () => {
+    const workspace = createWorkspace()
+    const client = new CodexJsonRpcClient(fakeProcessOptions(workspace))
+    clients.push(client)
+    const starting = client.start({ name: "taskmux", title: "TaskMux", version: "0.1.0" })
+
+    await expect(client.request("thread/start", { cwd: workspace })).rejects.toThrow(
+      "app_server_not_started"
+    )
+    await starting
+  })
+
   it("delivers item notifications from an in-memory hello turn", async () => {
     const { client, workspace } = await startClient()
     const thread = await client.request<{ thread: { id: string } }>("thread/start", {
@@ -187,6 +199,19 @@ describe("CodexJsonRpcClient", () => {
 
     await expect(request).rejects.toThrow("app_server_exited")
     await expect(exit).resolves.toMatchObject({ type: "exit", code: 17 })
+  })
+
+  it("includes trailing stderr in the exit event", async () => {
+    const { client } = await startClient()
+    const exit = nextEvent(client, (event) => event.type === "exit")
+    const request = client.request("turn/start", { prompt: "[crash-stderr]" })
+
+    await expect(request).rejects.toThrow("app_server_exited")
+    await expect(exit).resolves.toMatchObject({
+      type: "exit",
+      code: 17,
+      stderr: expect.stringContaining("fake app-server trailing diagnostic"),
+    })
   })
 
   it("stops idempotently and rejects unresolved requests", async () => {
