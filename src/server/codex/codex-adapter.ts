@@ -347,6 +347,20 @@ export class CodexAppServerAdapter implements AgentAdapter {
         }
       }
     }
+    const runningToolEvents: Array<{
+      externalSessionId: string
+      operationId: string
+      tool: RunningTool
+    }> = []
+    for (const [key, tools] of this.#runningTools) {
+      const operationId = this.#turnOperations.get(key)
+      const separator = key.indexOf("\u0000")
+      if (operationId === undefined || separator === -1) continue
+      const externalSessionId = key.slice(0, separator)
+      for (const tool of tools.values()) {
+        runningToolEvents.push({ externalSessionId, operationId, tool })
+      }
+    }
     this.#activeTurns.clear()
     this.#interruptsRequested.clear()
     this.#latestStartOperations.clear()
@@ -358,6 +372,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
     for (const requestId of approvalRequestIds) {
       this.#declineServerRequest(requestId)
+    }
+    for (const { externalSessionId, operationId, tool } of runningToolEvents) {
+      this.#emit(
+        externalSessionId,
+        { type: "tool_status", tool: { ...tool, status: "failed" } },
+        operationId
+      )
     }
 
     for (const externalSessionId of affectedSessions) {

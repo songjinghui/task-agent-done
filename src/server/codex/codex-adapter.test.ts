@@ -570,6 +570,14 @@ describe("CodexAppServerAdapter", () => {
 
     expect(events).toEqual([
       event("thr_1", {
+        type: "tool_status",
+        tool: { id: "command_1", label: "运行命令", status: "failed" },
+      }, "operation-1"),
+      event("thr_2", {
+        type: "tool_status",
+        tool: { id: "command_2", label: "运行命令", status: "failed" },
+      }, "operation-2"),
+      event("thr_1", {
         type: "error",
         code: "app_server_exited",
         message: "Agent server exited unexpectedly.",
