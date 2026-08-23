@@ -6,9 +6,11 @@ import type {
 
 export function ApprovalBar({
   request,
+  externalError = null,
   onDecision,
 }: {
   request: ApprovalRequest | null
+  externalError?: string | null
   onDecision(decision: ApprovalDecision): Promise<void>
 }): ReactNode {
   const [pending, setPending] = useState(false)
@@ -21,7 +23,9 @@ export function ApprovalBar({
     setError(null)
   }, [request?.id])
 
-  if (!request) return null
+  if (!request) {
+    return externalError ? <p role="alert">{externalError}</p> : null
+  }
 
   const label =
     request.kind === "command"
@@ -53,7 +57,9 @@ export function ApprovalBar({
           拒绝
         </button>
       </div>
-      {error ? <p role="alert">{error}</p> : null}
+      {externalError ?? error ? (
+        <p role="alert">{externalError ?? error}</p>
+      ) : null}
     </div>
   )
 }

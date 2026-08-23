@@ -145,6 +145,153 @@ describe("live conversation reducer", () => {
     expect(selectDisplayedTurns(state, "c1")).toHaveLength(1)
   })
 
+  it("retires transient user and assistant turns after refreshed history uses different item IDs", () => {
+    let state = loadedState()
+    state = conversationReducer(state, {
+      type: "sendOptimistic",
+      conversationId: "c1",
+      requestId: "send-1",
+      text: "相同问题",
+    })
+    state = receive(state, 1, "c1", { type: "turn_started", turnId: "t1" })
+    state = receive(state, 2, "c1", {
+      type: "text_delta",
+      turnId: "t1",
+      text: "相同回答",
+    })
+    state = receive(state, 3, "c1", { type: "turn_completed", turnId: "t1" })
+    state = conversationReducer(state, {
+      type: "detailRequested",
+      conversationId: "c1",
+      requestId: 1,
+    })
+    state = conversationReducer(state, {
+      type: "detailSucceeded",
+      conversationId: "c1",
+      requestId: 1,
+      detail: {
+        conversationId: "c1",
+        turns: [
+          { id: "codex-user-item", role: "user", text: "相同问题", status: "completed" },
+          {
+            id: "codex-assistant-item",
+            role: "assistant",
+            text: "相同回答",
+            status: "completed",
+          },
+        ],
+      },
+    })
+
+    expect(selectDisplayedTurns(state, "c1").map((turn) => turn.text)).toEqual([
+      "相同问题",
+      "相同回答",
+    ])
+  })
+
+  it("preserves the optimistic user entry needed by a still-active turn during history reload", () => {
+    let state = loadedState()
+    state = conversationReducer(state, {
+      type: "sendOptimistic",
+      conversationId: "c1",
+      requestId: "send-active",
+      text: "仍在运行的问题",
+    })
+    state = receive(state, 1, "c1", {
+      type: "turn_started",
+      turnId: "active-turn",
+    })
+    state = receive(state, 2, "c1", {
+      type: "text_delta",
+      turnId: "active-turn",
+      text: "部分回答",
+    })
+    state = conversationReducer(state, {
+      type: "detailRequested",
+      conversationId: "c1",
+      requestId: 1,
+    })
+    state = conversationReducer(state, {
+      type: "detailSucceeded",
+      conversationId: "c1",
+      requestId: 1,
+      detail: { conversationId: "c1", turns: [] },
+    })
+
+    expect(selectDisplayedTurns(state, "c1").map((turn) => turn.text)).toEqual([
+      "仍在运行的问题",
+    ])
+    expect(selectLiveText(state, "c1", "active-turn")).toBe("部分回答")
+    expect(isAnyConversationRunning(state)).toBe(true)
+  })
+
+  it("starts a new stream epoch by clearing stale turn UI and accepts recovered statuses", () => {
+    let state = loadedState()
+    state = receive(state, 80, "c2", { type: "turn_started", turnId: "lost" })
+    state = receive(state, 81, "c2", tool("tool-lost", "running"))
+    state = receive(state, 82, "c2", approval("approval-lost"))
+
+    state = conversationReducer(state, { type: "streamReopened", epoch: 1 })
+
+    expect(state.lastEventSeq).toBe(0)
+    expect(state.streamEpoch).toBe(1)
+    expect(state.recoveryGeneration).toBe(1)
+    expect(state.summariesById.c2?.status).toBe("idle")
+    expect(selectTools(state, "c2")).toEqual([])
+    expect(selectApproval(state, "c2")).toBeNull()
+    expect(isAnyConversationRunning(state)).toBe(false)
+
+    state = receive(state, 1, "c2", {
+      type: "turn_interrupted",
+      turnId: "new-connection-terminal",
+    })
+    state = conversationReducer(state, {
+      type: "recoveryListSucceeded",
+      generation: 1,
+      conversations: [{ ...second, status: "running" }],
+    })
+    expect(state.summariesById.c2?.status).toBe("interrupted")
+  })
+
+  it("ignores a recovery list response from an older stream generation", () => {
+    let state = loadedState()
+    state = conversationReducer(state, { type: "streamReopened", epoch: 1 })
+    state = conversationReducer(state, { type: "streamReopened", epoch: 2 })
+    state = conversationReducer(state, {
+      type: "recoveryListSucceeded",
+      generation: 1,
+      conversations: [{ ...second, status: "running" }],
+    })
+
+    expect(state.recoveryGeneration).toBe(2)
+    expect(state.order).toEqual(["c1", "c2"])
+    expect(state.summariesById.c2?.status).toBe("idle")
+    expect(state.recovering).toBe(true)
+  })
+
+  it("ignores cancellation settlement from a retired stream request", () => {
+    let state = loadedState()
+    state = conversationReducer(state, {
+      type: "cancelStarted",
+      conversationId: "c1",
+      requestId: "cancel-old",
+    })
+    state = conversationReducer(state, { type: "streamReopened", epoch: 1 })
+    state = conversationReducer(state, {
+      type: "cancelStarted",
+      conversationId: "c1",
+      requestId: "cancel-new",
+    })
+    state = conversationReducer(state, {
+      type: "cancelFailed",
+      conversationId: "c1",
+      requestId: "cancel-old",
+    })
+
+    expect(state.liveByConversationId.c1?.cancelPending).toBe(true)
+    expect(state.liveByConversationId.c1?.cancelError).toBeNull()
+  })
+
   it.each([
     {
       name: "interruption",
@@ -324,6 +471,58 @@ describe("useEventStream", () => {
     ])
     expect(JSON.stringify(events)).not.toContain("operationId")
     expect(JSON.stringify(events)).not.toContain("rawProvider")
+  })
+
+  it("resets the accepted seq baseline only after an error-driven reopen", () => {
+    const dispatch = vi.fn<(action: ConversationAction) => void>()
+    render(<StreamProbe dispatch={dispatch} />)
+    const source = FakeEventSource.instances[0]!
+
+    act(() => {
+      source.open()
+      source.message(
+        JSON.stringify({
+          conversationId: "c1",
+          seq: 80,
+          payload: { type: "turn_started", turnId: "old" },
+        })
+      )
+      source.fail()
+      source.open()
+      source.message(
+        JSON.stringify({
+          conversationId: "c1",
+          seq: 1,
+          payload: { type: "turn_started", turnId: "new" },
+        })
+      )
+    })
+
+    expect(FakeEventSource.instances).toHaveLength(1)
+    expect(
+      dispatch.mock.calls.map(([action]) => action).filter(
+        (action) =>
+          action.type === "streamReopened" || action.type === "eventReceived"
+      )
+    ).toEqual([
+      {
+        type: "eventReceived",
+        envelope: {
+          conversationId: "c1",
+          seq: 80,
+          payload: { type: "turn_started", turnId: "old" },
+        },
+      },
+      { type: "streamReopened", epoch: 1 },
+      {
+        type: "eventReceived",
+        envelope: {
+          conversationId: "c1",
+          seq: 1,
+          payload: { type: "turn_started", turnId: "new" },
+        },
+      },
+    ])
   })
 })
 

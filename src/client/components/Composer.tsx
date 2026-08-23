@@ -1,75 +1,58 @@
-import { useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react"
+import type {
+  FormEvent,
+  KeyboardEvent,
+  ReactNode,
+} from "react"
 
 const MAX_MESSAGE_CODE_POINTS = 100_000
 
 export function Composer({
+  draft,
   globallyLocked,
   active,
+  sending,
+  cancelling,
+  sendError,
+  cancelError = null,
+  onDraftChange,
   onSend,
   onCancel,
 }: {
+  draft: string
   globallyLocked: boolean
   active: boolean
-  onSend(text: string): Promise<void>
-  onCancel(): Promise<void>
+  sending: boolean
+  cancelling: boolean
+  sendError: string | null
+  cancelError?: string | null
+  onDraftChange(draft: string): void
+  onSend(): void
+  onCancel(): void
 }): ReactNode {
-  const [draft, setDraft] = useState("")
-  const [sending, setSending] = useState(false)
-  const [cancelling, setCancelling] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [announcement, setAnnouncement] = useState("")
-  const sendInFlight = useRef(false)
-  const cancelInFlight = useRef(false)
   const length = [...draft].length
   const tooLong = length > MAX_MESSAGE_CODE_POINTS
   const canSend =
-    draft.trim().length > 0 &&
-    !tooLong &&
-    !globallyLocked &&
-    !sendInFlight.current
+    draft.trim().length > 0 && !tooLong && !globallyLocked && !sending
 
-  const submit = async (): Promise<void> => {
-    if (!canSend) return
-    sendInFlight.current = true
-    setSending(true)
-    setError(null)
-    setAnnouncement("")
-    try {
-      await onSend(draft)
-      setDraft("")
-      setAnnouncement("消息已发送")
-    } catch {
-      setError("发送失败，请重试。")
-    } finally {
-      sendInFlight.current = false
-      setSending(false)
-    }
-  }
-
-  const cancel = async (): Promise<void> => {
-    if (cancelInFlight.current) return
-    cancelInFlight.current = true
-    setCancelling(true)
-    setError(null)
-    try {
-      await onCancel()
-    } catch {
-      setError("取消失败，请重试。")
-    } finally {
-      cancelInFlight.current = false
-      setCancelling(false)
-    }
+  const submit = (): void => {
+    if (canSend) onSend()
   }
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault()
-    void submit()
+    submit()
   }
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key !== "Enter" || event.shiftKey) return
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.nativeEvent.isComposing
+    ) {
+      return
+    }
     event.preventDefault()
-    void submit()
+    submit()
   }
 
   return (
@@ -81,30 +64,32 @@ export function Composer({
         id="message-composer"
         value={draft}
         rows={4}
-        onChange={(event) => setDraft(event.target.value)}
+        onChange={(event) => onDraftChange(event.target.value)}
         onKeyDown={onKeyDown}
         aria-describedby="composer-status"
       />
       <div className="composer-actions">
         <span
           id="composer-status"
-          role={tooLong || announcement ? "status" : undefined}
+          role={tooLong ? "status" : undefined}
           aria-live="polite"
         >
           {tooLong
             ? `消息过长（${length.toLocaleString()} / ${MAX_MESSAGE_CODE_POINTS.toLocaleString()}）`
-            : announcement}
+            : ""}
         </span>
         {active ? (
-          <button type="button" onClick={() => void cancel()} disabled={cancelling}>
+          <button type="button" onClick={onCancel} disabled={cancelling}>
             {cancelling ? "正在取消…" : "取消"}
           </button>
         ) : null}
-        <button type="submit" disabled={!canSend || sending}>
+        <button type="submit" disabled={!canSend}>
           {sending ? "发送中…" : "发送"}
         </button>
       </div>
-      {error ? <p role="alert">{error}</p> : null}
+      {sendError ?? cancelError ? (
+        <p role="alert">{sendError ?? cancelError}</p>
+      ) : null}
     </form>
   )
 }

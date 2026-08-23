@@ -466,6 +466,251 @@ describe("App", () => {
     expect(screen.queryByRole("status", { name: "事件流状态" })).not.toBeInTheDocument()
     expect(FakeEventSource.instances).toHaveLength(1)
   })
+
+  it("keeps drafts and send settlement scoped to their conversation", async () => {
+    const idleSecond = { ...second, status: "idle" as const }
+    const accepted = deferred<{ accepted: true }>()
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [first, idleSecond],
+          sendMessage: () => accepted.promise,
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    let input = screen.getByRole("textbox", { name: "消息" })
+    await user.type(input, "A 草稿{enter}")
+
+    await user.click(screen.getByRole("button", { name: /第二个会话/ }))
+    input = screen.getByRole("textbox", { name: "消息" })
+    await user.type(input, "B 草稿")
+    accepted.resolve({ accepted: true })
+    await waitFor(() => expect(input).toHaveValue("B 草稿"))
+
+    await user.click(screen.getByRole("button", { name: /修复 README 测试/ }))
+    expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue("")
+    await user.click(screen.getByRole("button", { name: /第二个会话/ }))
+    expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue("B 草稿")
+  })
+
+  it("does not erase text added after a submitted draft snapshot", async () => {
+    const accepted = deferred<{ accepted: true }>()
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [first],
+          sendMessage: () => accepted.promise,
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    const input = screen.getByRole("textbox", { name: "消息" })
+    await user.type(input, "已提交{enter}")
+    await user.type(input, " 后来输入")
+
+    accepted.resolve({ accepted: true })
+    await waitFor(() => expect(input).toHaveValue("已提交 后来输入"))
+  })
+
+  it("keeps a rejected send error with conversation A while viewing conversation B", async () => {
+    const idleSecond = { ...second, status: "idle" as const }
+    const response = deferred<{ accepted: true }>()
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [first, idleSecond],
+          sendMessage: () => response.promise,
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    await user.type(screen.getByRole("textbox", { name: "消息" }), "A 失败{enter}")
+    await user.click(screen.getByRole("button", { name: /第二个会话/ }))
+    response.reject(new Error("provider raw secret"))
+
+    await waitFor(() =>
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument()
+    )
+    await user.click(screen.getByRole("button", { name: /修复 README 测试/ }))
+    expect(await screen.findByRole("alert")).toHaveTextContent("发送失败，请重试。")
+    expect(screen.getByRole("alert")).not.toHaveTextContent("provider raw secret")
+    expect(screen.getByRole("textbox", { name: "消息" })).toHaveValue("A 失败")
+  })
+
+  it("keeps an HTTP approval-expired error visible after clearing the request", async () => {
+    installEventSource()
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [first],
+          respondToApproval: async () => {
+            throw new TaskMuxApiError(
+              "approval_expired",
+              "raw provider approval detail",
+              409
+            )
+          },
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    act(() => {
+      FakeEventSource.instances[0]!.event(1, first.id, {
+        type: "approval_requested",
+        request: { id: "a-expired", kind: "command", label: "secret" },
+      })
+    })
+    await user.click(screen.getByRole("button", { name: "批准" }))
+
+    expect(
+      await screen.findByText("审批请求已失效。", { selector: "[role=alert]" })
+    ).toBeVisible()
+    expect(screen.queryByRole("group", { name: "Codex 请求运行命令" })).not.toBeInTheDocument()
+    expect(document.body).not.toHaveTextContent("raw provider approval detail")
+  })
+
+  it("recovers missed terminal history after reopen without duplicate transient turns", async () => {
+    installEventSource()
+    let listCalls = 0
+    let detailCalls = 0
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => {
+            listCalls += 1
+            return [first]
+          },
+          getConversation: async () => {
+            detailCalls += 1
+            return detail(
+              first.id,
+              detailCalls === 1
+                ? []
+                : [
+                    turn("history-user", "user", "恢复问题"),
+                    turn("history-assistant", "assistant", "恢复回答"),
+                  ]
+            )
+          },
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    const source = FakeEventSource.instances[0]!
+    await user.type(screen.getByRole("textbox", { name: "消息" }), "恢复问题{enter}")
+    act(() => {
+      source.open()
+      source.event(80, first.id, { type: "turn_started", turnId: "live-turn" })
+      source.event(81, first.id, {
+        type: "text_delta",
+        turnId: "live-turn",
+        text: "恢复回答",
+      })
+      source.fail()
+      source.open()
+    })
+
+    await waitFor(() => {
+      expect(listCalls).toBe(2)
+      expect(detailCalls).toBe(2)
+    })
+    expect(screen.getAllByText("恢复问题")).toHaveLength(1)
+    expect(screen.getAllByText("恢复回答")).toHaveLength(1)
+    expect(screen.queryByRole("button", { name: "取消" })).not.toBeInTheDocument()
+    expect(FakeEventSource.instances).toHaveLength(1)
+  })
+
+  it("ignores stale recovery detail after selection changes and refreshes unselected status", async () => {
+    installEventSource()
+    const recoveryDetail = deferred<ConversationDetail>()
+    let firstDetailCalls = 0
+    let listCalls = 0
+    const recoveredFirst = { ...first, status: "failed" as const }
+    const recoveredSecond = { ...second, status: "interrupted" as const }
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => {
+            listCalls += 1
+            return listCalls === 1 ? [first, second] : [recoveredFirst, recoveredSecond]
+          },
+          getConversation: (id) => {
+            if (id === second.id) {
+              return Promise.resolve(detail(second.id, [turn("b", "assistant", "B 历史")]))
+            }
+            firstDetailCalls += 1
+            return firstDetailCalls === 1
+              ? Promise.resolve(detail(first.id, []))
+              : recoveryDetail.promise
+          },
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    const source = FakeEventSource.instances[0]!
+    act(() => {
+      source.open()
+      source.fail()
+      source.open()
+    })
+    await waitFor(() => expect(firstDetailCalls).toBe(2))
+    await user.click(screen.getByRole("button", { name: /第二个会话/ }))
+    expect(await screen.findByText("B 历史")).toBeVisible()
+
+    recoveryDetail.resolve(detail(first.id, [turn("late", "assistant", "迟到恢复")]))
+    await act(async () => void (await recoveryDetail.promise))
+    expect(screen.queryByText("迟到恢复")).not.toBeInTheDocument()
+    expect(screen.getByText("B 历史")).toBeVisible()
+    expect(screen.getByRole("button", { name: /修复 README 测试/ })).toHaveTextContent("失败")
+    expect(screen.getByRole("button", { name: /第二个会话/ })).toHaveTextContent("已中断")
+  })
+
+  it("retires pre-reconnect request ownership so an old settlement cannot block or clear a new send", async () => {
+    installEventSource()
+    const oldResponse = deferred<{ accepted: true }>()
+    let sendCalls = 0
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [first],
+          sendMessage: () => {
+            sendCalls += 1
+            return sendCalls === 1
+              ? oldResponse.promise
+              : Promise.resolve({ accepted: true })
+          },
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    const source = FakeEventSource.instances[0]!
+    const input = screen.getByRole("textbox", { name: "消息" })
+    await user.type(input, "旧请求{enter}")
+    act(() => {
+      source.open()
+      source.fail()
+      source.open()
+    })
+    await waitFor(() =>
+      expect(screen.queryByRole("status", { name: "事件流状态" })).not.toBeInTheDocument()
+    )
+    await user.clear(input)
+    await user.type(input, "新请求{enter}")
+
+    expect(sendCalls).toBe(2)
+    await waitFor(() => expect(input).toHaveValue(""))
+    oldResponse.resolve({ accepted: true })
+    await act(async () => void (await oldResponse.promise))
+    expect(input).toHaveValue("")
+  })
 })
 
 function fakeApi(overrides: Partial<TaskMuxApi> = {}): TaskMuxApi {

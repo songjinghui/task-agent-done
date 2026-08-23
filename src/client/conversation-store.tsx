@@ -36,10 +36,17 @@ export type ConversationState = {
   loading: ConversationLoadingState
   error: string | null
   errorScope: "list" | "create" | "detail" | null
-  detailRequest: { conversationId: string; requestId: number } | null
+  detailRequest: {
+    conversationId: string
+    requestId: number
+    transientTurnIds: string[]
+  } | null
   detailLoadGeneration: number
   lastEventSeq: number
   streamStatus: "connecting" | "connected" | "disconnected"
+  streamEpoch: number
+  recoveryGeneration: number
+  recovering: boolean
   liveByConversationId: Record<string, LiveConversationState>
 }
 
@@ -50,10 +57,17 @@ export type LiveConversationState = {
   toolsById: Record<string, ToolStatus>
   toolOrder: string[]
   approval: ApprovalRequest | null
+  approvalError: string | null
   transientTurns: MessageTurn[]
+  draft: string
+  sendError: string | null
+  cancelPending: boolean
+  cancelRequestId: string | null
+  cancelError: string | null
   pendingSend: {
     requestId: string
     optimisticTurnId: string
+    submittedText: string
     previousStatus: ConversationSummary["status"]
     acceptedByEvent: boolean
   } | null
@@ -73,6 +87,9 @@ export const initialConversationState: ConversationState = {
   detailLoadGeneration: 0,
   lastEventSeq: 0,
   streamStatus: "connecting",
+  streamEpoch: 0,
+  recoveryGeneration: 0,
+  recovering: false,
   liveByConversationId: {},
 }
 
@@ -81,8 +98,15 @@ export type ConversationAction =
       type: "listSucceeded"
       workspace: string
       conversations: ConversationSummary[]
+      generation?: number
     }
-  | { type: "listFailed"; message: string }
+  | { type: "listFailed"; message: string; generation?: number }
+  | {
+      type: "recoveryListSucceeded"
+      generation: number
+      conversations: ConversationSummary[]
+    }
+  | { type: "streamReopened"; epoch: number }
   | { type: "createStarted" }
   | { type: "createSucceeded"; conversation: ConversationSummary }
   | { type: "createFailed"; message: string }
@@ -112,6 +136,7 @@ export type ConversationAction =
       requestId: string
       text: string
     }
+  | { type: "draftChanged"; conversationId: string; draft: string }
   | { type: "sendSucceeded"; conversationId: string; requestId: string }
   | {
       type: "sendRejected"
@@ -124,6 +149,15 @@ export type ConversationAction =
       conversationId: string
       requestId: string
     }
+  | {
+      type: "approvalFailed"
+      conversationId: string
+      requestId: string
+      expired: boolean
+    }
+  | { type: "cancelStarted"; conversationId: string; requestId: string }
+  | { type: "cancelSettled"; conversationId: string; requestId: string }
+  | { type: "cancelFailed"; conversationId: string; requestId: string }
 
 export function conversationReducer(
   state: ConversationState,
@@ -131,15 +165,13 @@ export function conversationReducer(
 ): ConversationState {
   switch (action.type) {
     case "listSucceeded": {
-      const summariesById = Object.fromEntries(
-        action.conversations.map((conversation) => {
-          const liveStatus = state.liveByConversationId[conversation.id]?.status
-          return [
-            conversation.id,
-            liveStatus ? { ...conversation, status: liveStatus } : conversation,
-          ]
-        })
-      )
+      if (
+        action.generation !== undefined &&
+        action.generation !== state.recoveryGeneration
+      ) {
+        return state
+      }
+      const summariesById = mergeLiveStatuses(state, action.conversations)
       const order = action.conversations.map((conversation) => conversation.id)
       return {
         ...state,
@@ -153,12 +185,78 @@ export function conversationReducer(
       }
     }
     case "listFailed":
+      if (
+        action.generation !== undefined &&
+        action.generation !== state.recoveryGeneration
+      ) {
+        return state
+      }
       return {
         ...state,
         loading: { ...state.loading, list: false },
+        recovering: false,
         error: action.message,
         errorScope: "list",
       }
+    case "recoveryListSucceeded": {
+      if (action.generation !== state.recoveryGeneration) return state
+      const summariesById = mergeLiveStatuses(state, action.conversations)
+      const order = action.conversations.map((conversation) => conversation.id)
+      const selectedId =
+        state.selectedId && summariesById[state.selectedId]
+          ? state.selectedId
+          : (order[0] ?? null)
+      return {
+        ...state,
+        summariesById,
+        order,
+        selectedId,
+        recovering: false,
+        error: null,
+        errorScope: null,
+      }
+    }
+    case "streamReopened": {
+      if (action.epoch <= state.streamEpoch) return state
+      const summariesById = Object.fromEntries(
+        Object.values(state.summariesById).map((summary) => [
+          summary.id,
+          summary.status === "running"
+            ? { ...summary, status: "idle" as const }
+            : summary,
+        ])
+      )
+      const liveByConversationId = Object.fromEntries(
+        Object.entries(state.liveByConversationId).map(([conversationId, live]) => [
+          conversationId,
+          {
+            ...live,
+            status: null,
+            activeTurnId: null,
+            textByTurnId: {},
+            toolsById: {},
+            toolOrder: [],
+            approval: null,
+            approvalError: null,
+            pendingSend: null,
+            cancelPending: false,
+            cancelRequestId: null,
+            cancelError: null,
+          },
+        ])
+      )
+      return {
+        ...state,
+        summariesById,
+        liveByConversationId,
+        lastEventSeq: 0,
+        streamEpoch: action.epoch,
+        recoveryGeneration: state.recoveryGeneration + 1,
+        recovering: true,
+        detailRequest: null,
+        detailLoadGeneration: state.detailLoadGeneration + 1,
+      }
+    }
     case "createStarted":
       return {
         ...state,
@@ -221,13 +319,16 @@ export function conversationReducer(
         detailRequest: {
           conversationId: action.conversationId,
           requestId: action.requestId,
+          transientTurnIds: retirableTransientIds(
+            state.liveByConversationId[action.conversationId]
+          ),
         },
         error: null,
         errorScope: null,
       }
     case "detailSucceeded":
       if (!isCurrentDetailRequest(state, action)) return state
-      return {
+      return retireTransientTurns({
         ...state,
         detailsById: {
           ...state.detailsById,
@@ -237,7 +338,7 @@ export function conversationReducer(
         detailRequest: null,
         error: null,
         errorScope: null,
-      }
+      }, action.conversationId, state.detailRequest!.transientTurnIds)
     case "detailFailed":
       if (!isCurrentDetailRequest(state, action)) return state
       return {
@@ -253,6 +354,14 @@ export function conversationReducer(
         : { ...state, streamStatus: action.status }
     case "eventReceived":
       return reduceEvent(state, action.envelope)
+    case "draftChanged": {
+      const live = liveFor(state, action.conversationId)
+      return withLive(state, action.conversationId, {
+        ...live,
+        draft: action.draft,
+        sendError: null,
+      })
+    }
     case "sendOptimistic": {
       const live = liveFor(state, action.conversationId)
       if (live.pendingSend || live.activeTurnId) return state
@@ -277,9 +386,11 @@ export function conversationReducer(
           pendingSend: {
             requestId: action.requestId,
             optimisticTurnId,
+            submittedText: action.text,
             previousStatus,
             acceptedByEvent: false,
           },
+          sendError: null,
           error: null,
         }
       )
@@ -289,7 +400,10 @@ export function conversationReducer(
       if (live?.pendingSend?.requestId !== action.requestId) return state
       return withLive(state, action.conversationId, {
         ...live,
+        draft:
+          live.draft === live.pendingSend.submittedText ? "" : live.draft,
         pendingSend: null,
+        sendError: null,
       })
     }
     case "sendRejected": {
@@ -306,6 +420,7 @@ export function conversationReducer(
               (turn) => turn.id !== pending.optimisticTurnId
             ),
         pendingSend: null,
+        sendError: "发送失败，请重试。",
         error: live.error,
       }
       const next = withLive(state, action.conversationId, nextLive)
@@ -319,7 +434,49 @@ export function conversationReducer(
       return withLive(state, action.conversationId, {
         ...live,
         approval: null,
+        approvalError: null,
       })
+    }
+    case "approvalFailed": {
+      const live = state.liveByConversationId[action.conversationId]
+      if (!live || live.approval?.id !== action.requestId) return state
+      return withLive(state, action.conversationId, {
+        ...live,
+        approval: action.expired ? null : live.approval,
+        approvalError: action.expired
+          ? "审批请求已失效。"
+          : "无法处理审批请求。",
+      })
+    }
+    case "cancelStarted": {
+      const live = liveFor(state, action.conversationId)
+      return withLive(state, action.conversationId, {
+        ...live,
+        cancelPending: true,
+        cancelRequestId: action.requestId,
+        cancelError: null,
+      })
+    }
+    case "cancelSettled": {
+      const live = state.liveByConversationId[action.conversationId]
+      return live?.cancelRequestId === action.requestId
+        ? withLive(state, action.conversationId, {
+            ...live,
+            cancelPending: false,
+            cancelRequestId: null,
+          })
+        : state
+    }
+    case "cancelFailed": {
+      const live = state.liveByConversationId[action.conversationId]
+      return live?.cancelRequestId === action.requestId
+        ? withLive(state, action.conversationId, {
+            ...live,
+            cancelPending: false,
+            cancelRequestId: null,
+            cancelError: "取消失败，请重试。",
+          })
+        : state
     }
   }
 }
@@ -388,6 +545,7 @@ function reduceEvent(
       return withLive(stateWithSeq, conversationId, {
         ...live,
         approval: payload.request,
+        approvalError: null,
       })
     case "turn_completed": {
       if (live.activeTurnId && live.activeTurnId !== payload.turnId) {
@@ -461,7 +619,10 @@ function terminalLive(
     toolsById: {},
     toolOrder: [],
     approval: null,
+    approvalError: null,
     pendingSend: null,
+    cancelPending: false,
+    cancelRequestId: null,
     ...overrides,
   }
 }
@@ -474,10 +635,61 @@ function emptyLive(): LiveConversationState {
     toolsById: {},
     toolOrder: [],
     approval: null,
+    approvalError: null,
     transientTurns: [],
+    draft: "",
+    sendError: null,
+    cancelPending: false,
+    cancelRequestId: null,
+    cancelError: null,
     pendingSend: null,
     error: null,
   }
+}
+
+function mergeLiveStatuses(
+  state: ConversationState,
+  conversations: ConversationSummary[]
+): Record<string, ConversationSummary> {
+  return Object.fromEntries(
+    conversations.map((conversation) => {
+      const liveStatus = state.liveByConversationId[conversation.id]?.status
+      return [
+        conversation.id,
+        liveStatus ? { ...conversation, status: liveStatus } : conversation,
+      ]
+    })
+  )
+}
+
+function retireTransientTurns(
+  state: ConversationState,
+  conversationId: string,
+  retiredIds: string[]
+): ConversationState {
+  const live = state.liveByConversationId[conversationId]
+  if (!live || retiredIds.length === 0) return state
+  const retired = new Set(retiredIds)
+  return withLive(state, conversationId, {
+    ...live,
+    transientTurns: live.transientTurns.filter((turn) => !retired.has(turn.id)),
+  })
+}
+
+function retirableTransientIds(
+  live: LiveConversationState | undefined
+): string[] {
+  if (!live) return []
+  const protectedId =
+    live.pendingSend?.optimisticTurnId ??
+    (live.activeTurnId
+      ? [...live.transientTurns]
+          .reverse()
+          .find((turn) => turn.role === "user")?.id
+      : undefined)
+  return live.transientTurns
+    .filter((turn) => turn.id !== protectedId)
+    .map((turn) => turn.id)
 }
 
 function liveFor(
@@ -607,6 +819,7 @@ export type ConversationStore = {
   createConversation(): Promise<void>
   select(conversationId: string): void
   retrySelectedDetail(): void
+  updateDraft(draft: string): void
   sendMessage(text: string): Promise<void>
   cancelSelected(): Promise<void>
   respondToApproval(
@@ -630,29 +843,52 @@ export function ConversationProvider({
   )
   const mounted = useRef(false)
   const createInFlight = useRef(false)
-  const sendInFlight = useRef(false)
-  const cancelInFlight = useRef<string | null>(null)
+  const sendInFlight = useRef<object | null>(null)
+  const cancelInFlight = useRef<{
+    conversationId: string
+    ownership: object
+  } | null>(null)
   const approvalInFlight = useRef(new Set<string>())
   const sendRequestId = useRef(0)
+  const cancelRequestId = useRef(0)
   const detailRequestId = useRef(0)
   useEventStream(dispatch)
 
   useEffect(() => {
+    sendInFlight.current = null
+    cancelInFlight.current = null
+  }, [state.streamEpoch])
+
+  useEffect(() => {
     mounted.current = true
     let current = true
+    const generation = state.recoveryGeneration
 
     void Promise.all([api.getWorkspace(), api.listConversations()]).then(
       ([workspace, conversations]) => {
         if (!current) return
-        dispatch({
-          type: "listSucceeded",
-          workspace: workspace.workspace,
-          conversations,
-        })
+        dispatch(
+          generation === 0
+            ? {
+                type: "listSucceeded",
+                workspace: workspace.workspace,
+                conversations,
+                generation,
+              }
+            : {
+                type: "recoveryListSucceeded",
+                conversations,
+                generation,
+              }
+        )
       },
       (error: unknown) => {
         if (!current) return
-        dispatch({ type: "listFailed", message: errorMessage(error) })
+        dispatch({
+          type: "listFailed",
+          message: errorMessage(error),
+          generation,
+        })
       }
     )
 
@@ -660,7 +896,7 @@ export function ConversationProvider({
       current = false
       mounted.current = false
     }
-  }, [api])
+  }, [api, state.recoveryGeneration])
 
   useEffect(() => {
     const conversationId = state.selectedId
@@ -721,17 +957,27 @@ export function ConversationProvider({
     dispatch({ type: "retrySelectedDetail" })
   }, [])
 
+  const updateDraft = useCallback(
+    (draft: string) => {
+      if (!state.selectedId) return
+      dispatch({ type: "draftChanged", conversationId: state.selectedId, draft })
+    },
+    [state.selectedId]
+  )
+
   const sendMessage = useCallback(
     async (text: string) => {
       const conversationId = state.selectedId
       if (
         !conversationId ||
         sendInFlight.current ||
+        state.recovering ||
         isAnyConversationRunning(state)
       ) {
-        throw new Error("当前已有会话正在运行。")
+        return
       }
-      sendInFlight.current = true
+      const ownership = {}
+      sendInFlight.current = ownership
       const requestId = `send-${++sendRequestId.current}`
       dispatch({
         type: "sendOptimistic",
@@ -753,9 +999,10 @@ export function ConversationProvider({
             message: errorMessage(error),
           })
         }
-        throw error
       } finally {
-        sendInFlight.current = false
+        if (sendInFlight.current === ownership) {
+          sendInFlight.current = null
+        }
       }
     },
     [api, state]
@@ -766,15 +1013,25 @@ export function ConversationProvider({
     if (
       !conversationId ||
       !isConversationActive(state, conversationId) ||
-      cancelInFlight.current === conversationId
+      cancelInFlight.current?.conversationId === conversationId
     ) {
       return
     }
-    cancelInFlight.current = conversationId
+    const ownership = {}
+    const requestId = `cancel-${++cancelRequestId.current}`
+    cancelInFlight.current = { conversationId, ownership }
+    dispatch({ type: "cancelStarted", conversationId, requestId })
     try {
       await api.cancelConversation(conversationId)
+      if (mounted.current) {
+        dispatch({ type: "cancelSettled", conversationId, requestId })
+      }
+    } catch (error) {
+      if (mounted.current) {
+        dispatch({ type: "cancelFailed", conversationId, requestId })
+      }
     } finally {
-      if (cancelInFlight.current === conversationId) {
+      if (cancelInFlight.current?.ownership === ownership) {
         cancelInFlight.current = null
       }
     }
@@ -800,12 +1057,15 @@ export function ConversationProvider({
           dispatch({ type: "approvalResolved", conversationId, requestId })
         }
       } catch (error) {
-        if (
-          mounted.current &&
-          error instanceof TaskMuxApiError &&
-          error.code === "approval_expired"
-        ) {
-          dispatch({ type: "approvalResolved", conversationId, requestId })
+        if (mounted.current) {
+          dispatch({
+            type: "approvalFailed",
+            conversationId,
+            requestId,
+            expired:
+              error instanceof TaskMuxApiError &&
+              error.code === "approval_expired",
+          })
         }
         throw error
       } finally {
@@ -834,6 +1094,7 @@ export function ConversationProvider({
       createConversation,
       select,
       retrySelectedDetail,
+      updateDraft,
       sendMessage,
       cancelSelected,
       respondToApproval,
@@ -846,6 +1107,7 @@ export function ConversationProvider({
     select,
     sendMessage,
     state,
+    updateDraft,
   ])
 
   return (

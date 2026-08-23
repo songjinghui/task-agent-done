@@ -20,10 +20,17 @@ export function Thread({
   liveText,
   tools,
   approval,
+  approvalError,
   liveError,
+  draft,
+  sending,
+  cancelling,
+  sendError,
+  cancelError,
   globallyLocked,
   active,
   onSend,
+  onDraftChange,
   onCancel,
   onApproval,
 }: {
@@ -35,10 +42,17 @@ export function Thread({
   liveText: string
   tools: ToolStatus[]
   approval: ApprovalRequest | null
+  approvalError: string | null
   liveError: string | null
+  draft: string
+  sending: boolean
+  cancelling: boolean
+  sendError: string | null
+  cancelError: string | null
   globallyLocked: boolean
   active: boolean
-  onSend(text: string): Promise<void>
+  onDraftChange(draft: string): void
+  onSend(): Promise<void>
   onCancel(): Promise<void>
   onApproval(decision: ApprovalDecision): Promise<void>
 }): ReactNode {
@@ -96,17 +110,27 @@ export function Thread({
           ))}
         </section>
       ) : null}
-      <ApprovalBar request={approval} onDecision={onApproval} />
+      <ApprovalBar
+        request={approval}
+        externalError={approvalError}
+        onDecision={onApproval}
+      />
       {liveError ? (
         <p className="turn-error" role="alert">
           {liveError}
         </p>
       ) : null}
       <Composer
+        draft={draft}
         globallyLocked={globallyLocked}
         active={active}
-        onSend={onSend}
-        onCancel={onCancel}
+        sending={sending}
+        cancelling={cancelling}
+        sendError={sendError}
+        cancelError={cancelError}
+        onDraftChange={onDraftChange}
+        onSend={() => void onSend()}
+        onCancel={() => void onCancel()}
       />
     </main>
   )

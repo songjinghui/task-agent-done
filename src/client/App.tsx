@@ -32,6 +32,7 @@ function Workspace(): ReactNode {
     createConversation,
     select,
     retrySelectedDetail,
+    updateDraft,
     sendMessage,
     cancelSelected,
     respondToApproval,
@@ -90,10 +91,17 @@ function Workspace(): ReactNode {
           liveText={liveText}
           tools={tools}
           approval={approval}
+          approvalError={live?.approvalError ?? null}
           liveError={live?.error ?? null}
-          globallyLocked={isAnyConversationRunning(state)}
+          draft={live?.draft ?? ""}
+          sending={Boolean(live?.pendingSend)}
+          cancelling={live?.cancelPending ?? false}
+          sendError={live?.sendError ?? null}
+          cancelError={live?.cancelError ?? null}
+          globallyLocked={state.recovering || isAnyConversationRunning(state)}
           active={active}
-          onSend={sendMessage}
+          onDraftChange={updateDraft}
+          onSend={() => sendMessage(live?.draft ?? "")}
           onCancel={cancelSelected}
           onApproval={(decision) =>
             approval
