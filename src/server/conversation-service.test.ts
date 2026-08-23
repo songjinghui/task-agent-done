@@ -438,8 +438,8 @@ describe("ConversationService", () => {
     expect(adapter.cancelTurnCalls).toEqual(["session-1"])
   })
 
-  it("marks cancellation failure and releases the owned global lock", async () => {
-    const { adapter, repository, service } = createHarness()
+  it("keeps global ownership after cancellation failure until a terminal event", async () => {
+    const { adapter, eventSink, repository, service } = createHarness()
     const first = await service.create()
     const second = await service.create()
     await service.sendText(first.id, "first")
@@ -449,7 +449,22 @@ describe("ConversationService", () => {
 
     await expect(service.cancel(first.id)).rejects.toThrow("cancel failed")
 
-    expect(repository.getById(first.id)?.status).toBe("failed")
+    expect(repository.getById(first.id)?.status).toBe("running")
+    expect(eventSink.events).toEqual([
+      {
+        conversationId: first.id,
+        payload: {
+          type: "error",
+          code: "turn_cancel_failed",
+          message: "Failed to cancel the active turn.",
+        },
+      },
+    ])
+    await expect(service.sendText(second.id, "second")).rejects.toMatchObject({
+      code: "turn_conflict",
+    })
+
+    adapter.emit("session-1", { type: "turn_interrupted", turnId: "t1" })
     await expect(service.sendText(second.id, "second")).resolves.toBeUndefined()
   })
 

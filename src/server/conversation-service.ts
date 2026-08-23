@@ -194,7 +194,12 @@ export class ConversationService {
     try {
       await this.#adapter.cancelTurn(ownership.externalSessionId)
     } catch (error) {
-      this.#finishActiveTurn(conversationId, "failed", ownership)
+      this.#cancellationRequests.delete(conversationId)
+      this.#eventSink.publish(conversationId, {
+        type: "error",
+        code: "turn_cancel_failed",
+        message: "Failed to cancel the active turn.",
+      })
       throw error
     }
   }
