@@ -488,6 +488,51 @@ describe("App", () => {
     expect(screen.queryByRole("button", { name: "取消" })).not.toBeInTheDocument()
   })
 
+  it("allows a new turn to start a second cancel while the retired cancel HTTP call is pending", async () => {
+    installEventSource()
+    const firstCancel = deferred<void>()
+    const secondCancel = deferred<void>()
+    const cancelConversation = vi
+      .fn<(conversationId: string) => Promise<void>>()
+      .mockImplementationOnce(() => firstCancel.promise)
+      .mockImplementationOnce(() => secondCancel.promise)
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [first],
+          cancelConversation,
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    const source = FakeEventSource.instances[0]!
+    act(() => {
+      source.open()
+      source.event(1, first.id, { type: "turn_started", turnId: "turn-one" })
+    })
+    await user.click(screen.getByRole("button", { name: "取消" }))
+    expect(cancelConversation).toHaveBeenCalledTimes(1)
+
+    act(() => {
+      source.event(2, first.id, {
+        type: "turn_interrupted",
+        turnId: "turn-one",
+      })
+      source.event(3, first.id, { type: "turn_started", turnId: "turn-two" })
+    })
+    await user.click(screen.getByRole("button", { name: "取消" }))
+    expect(cancelConversation).toHaveBeenCalledTimes(2)
+
+    firstCancel.resolve()
+    await act(async () => void (await firstCancel.promise))
+    expect(screen.getByRole("button", { name: "正在取消…" })).toBeDisabled()
+
+    secondCancel.resolve()
+    await act(async () => void (await secondCancel.promise))
+    expect(screen.getByRole("button", { name: "取消" })).toBeEnabled()
+  })
+
   it("shows the EventSource reconnect state without creating another connection", async () => {
     installEventSource()
     render(<App api={fakeApi()} />)
@@ -752,6 +797,68 @@ describe("App", () => {
     expect(screen.getAllByText("恢复回答")).toHaveLength(1)
     expect(screen.queryByRole("button", { name: "取消" })).not.toBeInTheDocument()
     expect(FakeEventSource.instances).toHaveLength(1)
+  })
+
+  it("syncs a reconnect terminal by epoch identity after recovery detail succeeds but before list status", async () => {
+    installEventSource()
+    const recoveryList = deferred<ConversationSummary[]>()
+    let listCalls = 0
+    let detailCalls = 0
+    render(
+      <App
+        api={fakeApi({
+          listConversations: () => {
+            listCalls += 1
+            return listCalls === 1
+              ? Promise.resolve([first])
+              : recoveryList.promise
+          },
+          getConversation: async () => {
+            detailCalls += 1
+            return detail(
+              first.id,
+              detailCalls < 3
+                ? []
+                : [turn("recovered-history", "assistant", "终态后历史")]
+            )
+          },
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    const source = FakeEventSource.instances[0]!
+    act(() => {
+      source.open()
+      source.fail()
+      source.open()
+    })
+    await waitFor(() => expect(detailCalls).toBe(2))
+    expect(listCalls).toBe(2)
+
+    act(() => {
+      source.event(1, first.id, {
+        type: "turn_completed",
+        turnId: "reconnected-turn",
+      })
+    })
+    expect(await screen.findByText("终态后历史")).toBeVisible()
+    expect(detailCalls).toBe(3)
+
+    act(() => {
+      source.event(2, first.id, {
+        type: "turn_completed",
+        turnId: "reconnected-turn",
+      })
+    })
+    await act(async () => {})
+    expect(detailCalls).toBe(3)
+
+    recoveryList.resolve([{ ...first, status: "running" }])
+    await act(async () => void (await recoveryList.promise))
+    expect(screen.getByText("终态后历史")).toBeVisible()
+    expect(
+      screen.getByRole("button", { name: /修复 README 测试/ })
+    ).toHaveTextContent("待命")
   })
 
   it("supersedes pre-terminal detail and syncs selected completed history without cross-ID duplicates", async () => {

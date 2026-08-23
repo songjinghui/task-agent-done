@@ -50,6 +50,7 @@ export type ConversationState = {
     transientTurnIds: string[]
   } | null
   detailLoadGeneration: number
+  terminalDetailSyncKeys: Record<string, true>
   lastEventSeq: number
   streamStatus: "connecting" | "connected" | "disconnected"
   streamEpoch: number
@@ -99,6 +100,7 @@ export const initialConversationState: ConversationState = {
   },
   detailRequest: null,
   detailLoadGeneration: 0,
+  terminalDetailSyncKeys: {},
   lastEventSeq: 0,
   streamStatus: "connecting",
   streamEpoch: 0,
@@ -282,6 +284,7 @@ export function conversationReducer(
         recovering: true,
         detailRequest: null,
         detailLoadGeneration: state.detailLoadGeneration + 1,
+        terminalDetailSyncKeys: {},
         errors: {
           ...state.errors,
           bootstrap: null,
@@ -568,20 +571,30 @@ function reduceEvent(
     }
     case "tool_status": {
       const known = Boolean(live.toolsById[payload.tool.id])
-      return withLive(stateWithSeq, conversationId, {
-        ...live,
-        toolsById: { ...live.toolsById, [payload.tool.id]: payload.tool },
-        toolOrder: known
-          ? live.toolOrder
-          : [...live.toolOrder, payload.tool.id],
-      })
+      return withLive(
+        withSummaryStatus(stateWithSeq, conversationId, "running"),
+        conversationId,
+        markSendAccepted({
+          ...live,
+          status: "running",
+          toolsById: { ...live.toolsById, [payload.tool.id]: payload.tool },
+          toolOrder: known
+            ? live.toolOrder
+            : [...live.toolOrder, payload.tool.id],
+        })
+      )
     }
     case "approval_requested":
-      return withLive(stateWithSeq, conversationId, {
-        ...live,
-        approval: payload.request,
-        approvalError: null,
-      })
+      return withLive(
+        withSummaryStatus(stateWithSeq, conversationId, "running"),
+        conversationId,
+        markSendAccepted({
+          ...live,
+          status: "running",
+          approval: payload.request,
+          approvalError: null,
+        })
+      )
     case "turn_completed": {
       if (live.activeTurnId && live.activeTurnId !== payload.turnId) {
         return stateWithSeq
@@ -611,7 +624,7 @@ function reduceEvent(
           terminalLive(live, { status: "idle", transientTurns })
         ),
         conversationId,
-        isTerminalLifecycleActive(stateWithSeq, live, conversationId)
+        terminalDetailSyncKey(stateWithSeq, envelope)
       )
     }
     case "turn_interrupted":
@@ -625,7 +638,7 @@ function reduceEvent(
           terminalLive(live, { status: "interrupted" })
         ),
         conversationId,
-        isTerminalLifecycleActive(stateWithSeq, live, conversationId)
+        terminalDetailSyncKey(stateWithSeq, envelope)
       )
     case "error": {
       if (!payload.terminal) {
@@ -650,35 +663,58 @@ function reduceEvent(
           terminalLive(live, { status: "failed", error: payload.message })
         ),
         conversationId,
-        isTerminalLifecycleActive(stateWithSeq, live, conversationId)
+        terminalDetailSyncKey(stateWithSeq, envelope)
       )
     }
   }
 }
 
+function markSendAccepted(live: LiveConversationState): LiveConversationState {
+  return live.pendingSend
+    ? {
+        ...live,
+        pendingSend: { ...live.pendingSend, acceptedByEvent: true },
+      }
+    : live
+}
+
 function syncSelectedDetailAfterTerminal(
   state: ConversationState,
   conversationId: string,
-  terminalWasActive: boolean
+  terminalKey: string
 ): ConversationState {
-  if (!terminalWasActive || state.selectedId !== conversationId) return state
+  if (
+    state.selectedId !== conversationId ||
+    state.terminalDetailSyncKeys[terminalKey]
+  ) {
+    return state
+  }
   return {
     ...state,
     detailRequest: null,
     detailLoadGeneration: state.detailLoadGeneration + 1,
     loading: { ...state.loading, detail: true },
+    terminalDetailSyncKeys: {
+      ...state.terminalDetailSyncKeys,
+      [terminalKey]: true,
+    },
   }
 }
 
-function isTerminalLifecycleActive(
+function terminalDetailSyncKey(
   state: ConversationState,
-  live: LiveConversationState,
-  conversationId: string
-): boolean {
-  return Boolean(
-    live.activeTurnId ||
-      state.summariesById[conversationId]?.status === "running"
-  )
+  envelope: ConversationEventEnvelope
+): string {
+  const payload = envelope.payload
+  const identity =
+    payload.type === "turn_completed" || payload.type === "turn_interrupted"
+      ? `turn:${payload.turnId}`
+      : payload.type === "error" &&
+          payload.terminal &&
+          payload.scope === "turn"
+        ? `turn:${payload.turnId}`
+        : `session:${envelope.seq}`
+  return `${state.streamEpoch}:${envelope.conversationId}:${identity}`
 }
 
 function terminalLive(
@@ -949,10 +985,7 @@ export function ConversationProvider({
   const mounted = useRef(false)
   const createInFlight = useRef(false)
   const sendInFlight = useRef<object | null>(null)
-  const cancelInFlight = useRef<{
-    conversationId: string
-    ownership: object
-  } | null>(null)
+  const cancelInFlight = useRef(new Map<string, string>())
   const approvalInFlight = useRef(new Set<string>())
   const sendRequestId = useRef(0)
   const cancelRequestId = useRef(0)
@@ -961,7 +994,7 @@ export function ConversationProvider({
 
   useEffect(() => {
     sendInFlight.current = null
-    cancelInFlight.current = null
+    cancelInFlight.current.clear()
   }, [state.streamEpoch])
 
   useEffect(() => {
@@ -1135,16 +1168,22 @@ export function ConversationProvider({
 
   const cancelSelected = useCallback(async () => {
     const conversationId = state.selectedId
+    const live = conversationId
+      ? state.liveByConversationId[conversationId]
+      : undefined
+    const currentCancelRequestId = conversationId
+      ? cancelInFlight.current.get(conversationId)
+      : undefined
     if (
       !conversationId ||
       !isConversationActive(state, conversationId) ||
-      cancelInFlight.current?.conversationId === conversationId
+      (currentCancelRequestId !== undefined &&
+        live?.cancelRequestId === currentCancelRequestId)
     ) {
       return
     }
-    const ownership = {}
     const requestId = `cancel-${++cancelRequestId.current}`
-    cancelInFlight.current = { conversationId, ownership }
+    cancelInFlight.current.set(conversationId, requestId)
     dispatch({ type: "cancelStarted", conversationId, requestId })
     try {
       await api.cancelConversation(conversationId)
@@ -1156,8 +1195,8 @@ export function ConversationProvider({
         dispatch({ type: "cancelFailed", conversationId, requestId })
       }
     } finally {
-      if (cancelInFlight.current?.ownership === ownership) {
-        cancelInFlight.current = null
+      if (cancelInFlight.current.get(conversationId) === requestId) {
+        cancelInFlight.current.delete(conversationId)
       }
     }
   }, [api, state])

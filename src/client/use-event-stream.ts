@@ -19,7 +19,6 @@ export function useEventStream(
     status: "connecting",
   })
   const largestSeq = useRef(0)
-  const opened = useRef(false)
   const reopenPending = useRef(false)
   const epoch = useRef(0)
 
@@ -34,18 +33,17 @@ export function useEventStream(
     dispatch({ type: "streamStatusChanged", status: "connecting" })
 
     source.onopen = () => {
-      if (opened.current && reopenPending.current) {
+      if (reopenPending.current) {
         epoch.current += 1
         largestSeq.current = 0
         dispatch({ type: "streamReopened", epoch: epoch.current })
       }
-      opened.current = true
       reopenPending.current = false
       setState({ status: "connected" })
       dispatch({ type: "streamStatusChanged", status: "connected" })
     }
     source.onerror = () => {
-      if (opened.current) reopenPending.current = true
+      reopenPending.current = true
       setState({ status: "disconnected" })
       dispatch({ type: "streamStatusChanged", status: "disconnected" })
     }

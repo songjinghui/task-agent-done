@@ -146,20 +146,25 @@ describe("live conversation reducer", () => {
     expect(selectDisplayedTurns(state, "c1")).toHaveLength(1)
   })
 
-  it("requests selected terminal history sync only for the active lifecycle", () => {
+  it("requests selected terminal history sync once per epoch and turn identity", () => {
     let state = loadedState()
     state = receive(state, 1, "c1", { type: "turn_started", turnId: "t1" })
     state = receive(state, 2, "c1", { type: "turn_completed", turnId: "t1" })
     expect(state.detailLoadGeneration).toBe(1)
 
     state = receive(state, 3, "c1", {
-      type: "error",
-      code: "late_session_error",
-      message: "late",
-      terminal: true,
-      scope: "session",
+      type: "turn_completed",
+      turnId: "t1",
     })
     expect(state.detailLoadGeneration).toBe(1)
+
+    state = conversationReducer(state, { type: "streamReopened", epoch: 1 })
+    expect(state.detailLoadGeneration).toBe(2)
+    state = receive(state, 1, "c1", {
+      type: "turn_completed",
+      turnId: "t1",
+    })
+    expect(state.detailLoadGeneration).toBe(3)
   })
 
   it("retires transient user and assistant turns after refreshed history uses different item IDs", () => {
@@ -445,6 +450,38 @@ describe("live conversation reducer", () => {
     expect(isAnyConversationRunning(state)).toBe(true)
   })
 
+  it.each([
+    { name: "tool status", event: tool("evidence-tool", "running") },
+    { name: "approval request", event: approval("evidence-approval") },
+  ])(
+    "treats $name before turn_started as acceptance evidence on transport rejection",
+    ({ event }) => {
+      let state = loadedState()
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-evidence",
+        text: "服务已接收",
+      })
+      state = receive(state, 1, "c1", event)
+      state = conversationReducer(state, {
+        type: "sendRejected",
+        conversationId: "c1",
+        requestId: "send-evidence",
+        message: "raw transport failure",
+      })
+
+      expect(
+        selectDisplayedTurns(state, "c1").map((turn) => turn.text)
+      ).toEqual(["服务已接收"])
+      expect(state.liveByConversationId.c1?.pendingSend).toBeNull()
+      expect(state.liveByConversationId.c1?.sendError).toBe("发送失败，请重试。")
+      expect(state.liveByConversationId.c1?.status).toBe("running")
+      expect(state.summariesById.c1?.status).toBe("running")
+      expect(isConversationActive(state, "c1")).toBe(true)
+    }
+  )
+
   it("settles an HTTP success after SSE completed the turn first", () => {
     let state = loadedState()
     state = conversationReducer(state, {
@@ -664,6 +701,25 @@ describe("useEventStream", () => {
         },
       },
     ])
+  })
+
+  it("starts a recovery epoch when the first successful open follows an error", () => {
+    const dispatch = vi.fn<(action: ConversationAction) => void>()
+    render(<StreamProbe dispatch={dispatch} />)
+    const source = FakeEventSource.instances[0]!
+
+    act(() => {
+      source.fail()
+      source.open()
+    })
+
+    expect(FakeEventSource.instances).toHaveLength(1)
+    expect(
+      dispatch.mock.calls
+        .map(([action]) => action)
+        .filter((action) => action.type === "streamReopened")
+    ).toEqual([{ type: "streamReopened", epoch: 1 }])
+    expect(screen.getByRole("status")).toHaveTextContent("connected")
   })
 })
 
