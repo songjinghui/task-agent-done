@@ -1,6 +1,6 @@
 # TaskMux 纯文本 Agent Workbench V1 设计
 
-**状态：** 已确认，等待用户审阅书面规格
+**状态：** 已批准，可进入实施计划
 
 **日期：** 2026-08-23
 
@@ -140,12 +140,17 @@ src/
 ```ts
 interface AgentAdapter {
   createSession(workspace: string): Promise<{ externalSessionId: string }>
-  readSession(externalSessionId: string): Promise<ConversationDetail>
+  readSession(externalSessionId: string): Promise<MessageTurn[]>
   resumeSession(externalSessionId: string): Promise<void>
   sendText(externalSessionId: string, text: string): Promise<void>
   cancelTurn(externalSessionId: string): Promise<void>
   respondToApproval(requestId: string, decision: "accept" | "decline"): Promise<void>
-  subscribe(handler: (event: ConversationEvent) => void): () => void
+  subscribe(handler: (event: AgentAdapterEvent) => void): () => void
+}
+
+type AgentAdapterEvent = {
+  externalSessionId: string
+  payload: ConversationEvent
 }
 ```
 
@@ -229,7 +234,6 @@ idle | running | failed | interrupted
 ```ts
 type ConversationDetail = {
   conversationId: string
-  codexThreadId: string
   turns: MessageTurn[]
 }
 
@@ -242,7 +246,8 @@ type MessageTurn = {
 ```
 
 历史通过 `thread/read(includeTurns=true)` 获取并转换。SQLite 不复制消息正文，
-TaskMux 也不自行解析 Codex rollout JSONL。
+TaskMux 也不自行解析 Codex rollout JSONL。Codex Thread ID 只存在于服务端
+Repository 和 Adapter，不返回浏览器。
 
 ### 6.3 实时事件模型
 
