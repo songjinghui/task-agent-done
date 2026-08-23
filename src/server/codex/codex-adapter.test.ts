@@ -308,6 +308,156 @@ describe("CodexAppServerAdapter", () => {
     ])
   })
 
+  it("emits sanitized errors for failed and unsupported terminal turn statuses", () => {
+    const { events, fake } = setup()
+
+    fake.emit(
+      notification("turn/completed", {
+        threadId: "thr_failed",
+        turn: {
+          id: "turn_failed",
+          status: "failed",
+          items: [],
+          error: { message: "private provider failure detail" },
+        },
+      })
+    )
+    fake.emit(
+      notification("turn/completed", {
+        threadId: "thr_unknown",
+        turn: {
+          id: "turn_unknown",
+          status: "providerSpecificStatus",
+          items: [],
+          privatePayload: "must not escape",
+        },
+      })
+    )
+
+    expect(events).toEqual([
+      event("thr_failed", {
+        type: "error",
+        code: "turn_failed",
+        message: "Agent turn failed.",
+      }),
+      event("thr_unknown", {
+        type: "error",
+        code: "unsupported_turn_status",
+        message: "Agent turn ended with an unsupported status.",
+      }),
+    ])
+  })
+
+  it("fails every active session and clears transient state when the transport exits", async () => {
+    const { adapter, events, fake } = setup()
+
+    for (const suffix of ["1", "2"]) {
+      fake.emit(
+        notification("turn/started", {
+          threadId: `thr_${suffix}`,
+          turn: { id: `turn_${suffix}`, status: "inProgress", items: [] },
+        })
+      )
+      fake.emit(
+        notification("item/started", {
+          threadId: `thr_${suffix}`,
+          turnId: `turn_${suffix}`,
+          item: commandItem(`command_${suffix}`, "inProgress"),
+        })
+      )
+      fake.emit({
+        type: "server_request",
+        id: `wire_${suffix}`,
+        method: "item/commandExecution/requestApproval",
+        params: {
+          threadId: `thr_${suffix}`,
+          turnId: `turn_${suffix}`,
+          itemId: `command_${suffix}`,
+        },
+      })
+    }
+    events.length = 0
+
+    fake.emit({
+      type: "exit",
+      code: 17,
+      signal: null,
+      stderr: "private transport stderr",
+    })
+
+    expect(events).toEqual([
+      event("thr_1", {
+        type: "error",
+        code: "app_server_exited",
+        message: "Agent server exited unexpectedly.",
+      }),
+      event("thr_2", {
+        type: "error",
+        code: "app_server_exited",
+        message: "Agent server exited unexpectedly.",
+      }),
+    ])
+    expect(JSON.stringify(events)).not.toContain("private transport stderr")
+    await expect(adapter.respondToApproval("approval_1", "accept")).rejects.toThrow(
+      "approval_expired"
+    )
+    await expect(adapter.respondToApproval("approval_2", "accept")).rejects.toThrow(
+      "approval_expired"
+    )
+    await adapter.cancelTurn("thr_1")
+    await adapter.cancelTurn("thr_2")
+    expect(fake.requests).toEqual([])
+
+    events.length = 0
+    fake.emit(
+      notification("turn/completed", {
+        threadId: "thr_1",
+        turn: { id: "turn_1", status: "completed", items: [] },
+      })
+    )
+    expect(events).toEqual([
+      event("thr_1", { type: "turn_completed", turnId: "turn_1" }),
+    ])
+  })
+
+  it("fails an active session with a sanitized protocol error", async () => {
+    const { adapter, events, fake } = setup()
+
+    fake.emit(
+      notification("turn/started", {
+        threadId: "thr_1",
+        turn: { id: "turn_1", status: "inProgress", items: [] },
+      })
+    )
+    fake.emit({
+      type: "server_request",
+      id: "wire_1",
+      method: "item/fileChange/requestApproval",
+      params: { threadId: "thr_1", turnId: "turn_1", itemId: "file_1" },
+    })
+    events.length = 0
+
+    fake.emit({
+      type: "protocol_error",
+      message: "invalid_json",
+      raw: "private malformed provider payload",
+    })
+
+    expect(events).toEqual([
+      event("thr_1", {
+        type: "error",
+        code: "app_server_protocol_error",
+        message: "Agent server protocol error.",
+      }),
+    ])
+    expect(JSON.stringify(events)).not.toContain("private malformed provider payload")
+    await expect(adapter.respondToApproval("approval_1", "decline")).rejects.toThrow(
+      "approval_expired"
+    )
+    await adapter.cancelTurn("thr_1")
+    expect(fake.requests).toEqual([])
+  })
+
   it("normalizes command and file approvals without exposing raw details", async () => {
     const { adapter, events, fake } = setup()
 

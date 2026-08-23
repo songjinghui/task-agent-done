@@ -160,6 +160,20 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
     if (event.type === "server_request") {
       this.#handleServerRequest(event.id, event.method, event.params)
+      return
+    }
+    if (event.type === "exit") {
+      this.#handleTransportFailure(
+        "app_server_exited",
+        "Agent server exited unexpectedly."
+      )
+      return
+    }
+    if (event.type === "protocol_error") {
+      this.#handleTransportFailure(
+        "app_server_protocol_error",
+        "Agent server protocol error."
+      )
     }
   }
 
@@ -252,6 +266,27 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
     if (status === "completed") {
       this.#emit(threadId, { type: "turn_completed", turnId })
+      return
+    }
+    this.#emit(threadId, {
+      type: "error",
+      code: status === "failed" ? "turn_failed" : "unsupported_turn_status",
+      message:
+        status === "failed"
+          ? "Agent turn failed."
+          : "Agent turn ended with an unsupported status.",
+    })
+  }
+
+  #handleTransportFailure(code: string, message: string): void {
+    const affectedSessions = [...this.#activeTurns.keys()]
+    this.#activeTurns.clear()
+    this.#interruptsRequested.clear()
+    this.#runningTools.clear()
+    this.#pendingApprovals.clear()
+
+    for (const externalSessionId of affectedSessions) {
+      this.#emit(externalSessionId, { type: "error", code, message })
     }
   }
 
