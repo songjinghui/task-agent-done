@@ -336,6 +336,17 @@ export class CodexAppServerAdapter implements AgentAdapter {
       ...this.#activeTurns.keys(),
       ...this.#pendingStartOperations.keys(),
     ])
+    const approvalRequestIds = new Set<JsonRpcId>()
+    for (const pending of this.#pendingApprovals.values()) {
+      approvalRequestIds.add(pending.serverRequestId)
+    }
+    for (const events of this.#bufferedTurnEvents.values()) {
+      for (const event of events) {
+        if (event.approval) {
+          approvalRequestIds.add(event.approval.pending.serverRequestId)
+        }
+      }
+    }
     this.#activeTurns.clear()
     this.#interruptsRequested.clear()
     this.#latestStartOperations.clear()
@@ -344,6 +355,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.#bufferedTurnEvents.clear()
     this.#runningTools.clear()
     this.#pendingApprovals.clear()
+
+    for (const requestId of approvalRequestIds) {
+      this.#declineServerRequest(requestId)
+    }
 
     for (const externalSessionId of affectedSessions) {
       this.#emit(externalSessionId, {
@@ -505,16 +520,22 @@ export class CodexAppServerAdapter implements AgentAdapter {
     for (const [requestId, pending] of this.#pendingApprovals) {
       if (pending.turnKey === key) {
         this.#pendingApprovals.delete(requestId)
-        this.#client.respond(pending.serverRequestId, { decision: "decline" })
+        this.#declineServerRequest(pending.serverRequestId)
       }
     }
   }
 
   #declineBufferedApproval(bufferedEvent: BufferedTurnEvent): void {
     if (bufferedEvent.approval) {
-      this.#client.respond(bufferedEvent.approval.pending.serverRequestId, {
-        decision: "decline",
-      })
+      this.#declineServerRequest(bufferedEvent.approval.pending.serverRequestId)
+    }
+  }
+
+  #declineServerRequest(serverRequestId: JsonRpcId): void {
+    try {
+      this.#client.respond(serverRequestId, { decision: "decline" })
+    } catch {
+      // The transport may already be gone; bookkeeping is still retired locally.
     }
   }
 

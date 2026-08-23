@@ -646,6 +646,46 @@ describe("CodexAppServerAdapter", () => {
     )
     await adapter.cancelTurn("thr_1")
     expect(fake.requests).toEqual([])
+    expect(fake.responses).toEqual([
+      { id: "wire_1", result: { decision: "decline" } },
+    ])
+
+    fake.emit({
+      type: "protocol_error",
+      message: "invalid_json_rpc_message",
+    })
+    fake.emit({ type: "exit", code: 1, signal: null, stderr: "" })
+    expect(fake.responses).toEqual([
+      { id: "wire_1", result: { decision: "decline" } },
+    ])
+  })
+
+  it("declines a buffered approval when a protocol error invalidates its start", async () => {
+    const { adapter, fake } = setup()
+    const start = deferredValue<{ turn: { id: string } }>()
+    fake.enqueue("turn/start", start.promise)
+    const sending = adapter.sendText("thr_1", "seed", "operation-1")
+
+    fake.emit({
+      type: "server_request",
+      id: "wire_buffered",
+      method: "item/commandExecution/requestApproval",
+      params: { threadId: "thr_1", turnId: "turn_1", itemId: "command_1" },
+    })
+    fake.emit({ type: "protocol_error", message: "invalid_json" })
+
+    expect(fake.responses).toEqual([
+      { id: "wire_buffered", result: { decision: "decline" } },
+    ])
+
+    fake.emit({ type: "protocol_error", message: "invalid_json" })
+    fake.emit({ type: "exit", code: 1, signal: null, stderr: "" })
+    expect(fake.responses).toEqual([
+      { id: "wire_buffered", result: { decision: "decline" } },
+    ])
+
+    start.resolve({ turn: { id: "turn_1" } })
+    await sending
   })
 
   it("normalizes command and file approvals without exposing raw details", async () => {
