@@ -276,6 +276,72 @@ describe("CodexAppServerAdapter", () => {
     expect(JSON.stringify(events)).not.toMatch(/private-server|private-tool/)
   })
 
+  it.each([
+    { type: "webSearch", completedStatus: undefined, caseName: "statusless webSearch" },
+    { type: "imageView", completedStatus: undefined, caseName: "statusless imageView" },
+    { type: "webSearch", completedStatus: "futureStatus", caseName: "unknown-status webSearch" },
+  ])(
+    "treats a completed $caseName notification as authoritative",
+    async ({ type, completedStatus }) => {
+      const { adapter, events, fake } = setup()
+      fake.enqueue("turn/start", { turn: { id: "turn_1" } })
+      await adapter.sendText("thr_1", "seed", "operation-1")
+      const item = {
+        type,
+        id: `statusless_${type}`,
+        path: "/private/workspace/secret.png",
+        query: "private search query",
+      }
+
+      fake.emit(
+        notification("item/started", {
+          threadId: "thr_1",
+          turnId: "turn_1",
+          item,
+        })
+      )
+      const completedItem: Record<string, unknown> = { ...item }
+      if (completedStatus !== undefined) {
+        completedItem.status = completedStatus
+      }
+      fake.emit(
+        notification("item/completed", {
+          threadId: "thr_1",
+          turnId: "turn_1",
+          item: completedItem,
+        })
+      )
+      fake.emit(
+        notification("turn/completed", {
+          threadId: "thr_1",
+          turn: { id: "turn_1", status: "failed", items: [] },
+        })
+      )
+
+      expect(
+        events.filter(({ payload }) => payload.type === "tool_status")
+      ).toEqual([
+        event("thr_1", {
+          type: "tool_status",
+          tool: {
+            id: `statusless_${type}`,
+            label: "使用工具",
+            status: "running",
+          },
+        }, "operation-1"),
+        event("thr_1", {
+          type: "tool_status",
+          tool: {
+            id: `statusless_${type}`,
+            label: "使用工具",
+            status: "completed",
+          },
+        }, "operation-1"),
+      ])
+      expect(JSON.stringify(events)).not.toMatch(/secret\.png|private search query/)
+    }
+  )
+
   it("maps session methods and projects only user and assistant history", async () => {
     const { adapter, fake } = setup()
     fake.enqueue("thread/start", { thread: { id: "thr_1" } })

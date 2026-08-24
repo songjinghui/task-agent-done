@@ -123,11 +123,9 @@ function driveTurn(turn) {
   if (turn.prompt.includes("[generic-tool]")) {
     const item = {
       id: `generic_${turn.id}`,
-      type: "mcpToolCall",
-      server: "private-mcp-server",
-      tool: "secret-tool-name",
-      arguments: { path: "/private/secret.txt" },
-      status: "inProgress",
+      type: "webSearch",
+      query: "private secret search",
+      action: { type: "search", query: "private secret search" },
     }
     turn.genericItem = item
     notification("item/started", {
@@ -311,7 +309,7 @@ function handleResponse(message) {
   approvalRequests.delete(message.id)
   turn.approval = Object.hasOwn(message, "result") ? message.result : message.error
   if (turn.genericItem && !turn.genericCompleted) {
-    const completedItem = { ...turn.genericItem, status: "completed" }
+    const completedItem = { ...turn.genericItem }
     turn.genericCompleted = true
     turn.completedTools = [completedItem]
     notification("item/completed", {
@@ -319,19 +317,6 @@ function handleResponse(message) {
       turnId: turn.id,
       item: completedItem,
     })
-    const finishItem = {
-      id: `finish_${turn.id}`,
-      type: "commandExecution",
-      command: "printf finish",
-    }
-    turn.approvalItem = finishItem
-    turn.finalText = "generic tool complete"
-    notification("item/started", {
-      threadId: turn.threadId,
-      turnId: turn.id,
-      item: finishItem,
-    })
-    requestApproval(turn, "item/commandExecution/requestApproval")
     return
   }
   const accepted = turn.approval?.decision === "accept"

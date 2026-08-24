@@ -81,12 +81,10 @@ test("shows one sanitized generic tool identity from running through completed",
   await expect(page.getByLabel("工具状态")).toContainText("使用工具：运行中")
   await page.getByRole("button", { name: "批准" }).click()
   await expect(page.getByLabel("工具状态")).toContainText("使用工具：完成")
-  await expect(page.getByRole("button", { name: "批准" })).toBeEnabled()
-  await page.getByRole("button", { name: "批准" }).click()
-  await expect(page.getByLabel("Assistant 消息")).toContainText(
-    "generic tool complete"
-  )
-  await expect(page.getByText(/private|mcpToolCall|secret/i)).toHaveCount(0)
+  await page.getByRole("button", { name: "取消" }).click()
+  await expect(page.getByText("已中断", { exact: true })).toBeVisible()
+  await expect(page.getByLabel("使用工具：失败")).toHaveCount(0)
+  await expect(page.getByText(/private|webSearch|secret/i)).toHaveCount(0)
 })
 
 test("rejects a second turn with 409 and cancels the active turn", async ({

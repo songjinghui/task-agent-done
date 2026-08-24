@@ -700,15 +700,15 @@ function normalizeTool(item: Record<string, unknown>, started: boolean): ToolSta
   return {
     id,
     label,
-    status: started ? "running" : normalizeToolStatus(item.status),
+    status: started ? "running" : normalizeCompletedToolStatus(item.status),
   }
 }
 
-function normalizeToolStatus(status: unknown): ToolStatus["status"] {
+function normalizeCompletedToolStatus(status: unknown): ToolStatus["status"] {
   if (status === "completed" || status === "failed" || status === "declined") {
     return status
   }
-  return "running"
+  return "completed"
 }
 
 function isCodexAgentMessageItem(value: CodexItem): value is CodexAgentMessageItem {
