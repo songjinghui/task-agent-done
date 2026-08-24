@@ -35,6 +35,32 @@ afterEach(() => {
 })
 
 describe("App", () => {
+  it.each([
+    ["codex_not_found", "安装 Codex CLI"],
+    ["codex_version_unsupported", "更新 Codex CLI"],
+    ["codex_not_authenticated", "运行 codex login"],
+  ])("shows a stable action for %s without provider diagnostics", async (code, action) => {
+    render(
+      <App
+        api={fakeApi({
+          getHealth: async () => ({
+            status: "degraded",
+            error: {
+              code,
+              message: "stderr token /private/provider/path",
+            },
+          }),
+        })}
+      />
+    )
+
+    expect(await screen.findByRole("alert", { name: "Codex 诊断" })).toHaveTextContent(
+      action
+    )
+    expect(document.body).not.toHaveTextContent("stderr")
+    expect(document.body).not.toHaveTextContent("/private/provider/path")
+  })
+
   it("shows loading before rendering the workspace and conversation navigation", async () => {
     const list = deferred<ConversationSummary[]>()
     render(<App api={fakeApi({ listConversations: () => list.promise })} />)

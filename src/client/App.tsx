@@ -1,4 +1,4 @@
-import type { ReactNode } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 import { createTaskMuxApi, type TaskMuxApi } from "./api.js"
 import {
   ConversationProvider,
@@ -16,14 +16,40 @@ import { Thread } from "./components/Thread.js"
 const browserApi = createTaskMuxApi()
 
 export function App({ api = browserApi }: { api?: TaskMuxApi }): ReactNode {
+  const [diagnosticAction, setDiagnosticAction] = useState<string | null>(null)
+
+  useEffect(() => {
+    let current = true
+    void api.getHealth().then(
+      (health) => {
+        if (!current || health.status === "ok") return
+        setDiagnosticAction(DIAGNOSTIC_ACTIONS[health.error.code] ?? null)
+      },
+      () => {}
+    )
+    return () => {
+      current = false
+    }
+  }, [api])
+
   return (
     <ConversationProvider api={api}>
-      <Workspace />
+      <Workspace diagnosticAction={diagnosticAction} />
     </ConversationProvider>
   )
 }
 
-function Workspace(): ReactNode {
+const DIAGNOSTIC_ACTIONS: Readonly<Record<string, string>> = {
+  codex_not_found: "安装 Codex CLI",
+  codex_version_unsupported: "更新 Codex CLI",
+  codex_not_authenticated: "运行 codex login",
+}
+
+function Workspace({
+  diagnosticAction,
+}: {
+  diagnosticAction: string | null
+}): ReactNode {
   const {
     state,
     conversations,
@@ -72,6 +98,16 @@ function Workspace(): ReactNode {
         onSelect={select}
       />
       <div className="work-area">
+        {diagnosticAction ? (
+          <div
+            className="diagnostic-error"
+            role="alert"
+            aria-label="Codex 诊断"
+          >
+            <span>Codex 暂不可用。</span>
+            <strong>{diagnosticAction}</strong>
+          </div>
+        ) : null}
         {state.streamStatus === "disconnected" ? (
           <div
             className="stream-status"

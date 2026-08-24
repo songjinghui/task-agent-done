@@ -13,10 +13,12 @@ export type { AppHealth } from "./http-routes.js"
 
 export type BuildAppOptions = {
   config: ServerConfig
-  repository: ConversationRepository
-  adapter: AgentAdapter
+  repository?: ConversationRepository
+  adapter?: AgentAdapter
+  service?: ConversationService
   eventHub?: EventHub
   health?: () => AppHealth
+  deferReady?: boolean
 }
 
 export async function buildApp(
@@ -33,12 +35,7 @@ export async function buildApp(
       }),
   })
   const eventHub = options.eventHub ?? new EventHub()
-  const service = new ConversationService({
-    repository: options.repository,
-    adapter: options.adapter,
-    eventSink: eventHub,
-    workspace: options.config.workspace,
-  })
+  const service = options.service ?? createService(options, eventHub)
 
   registerHttpRoutes(app, {
     workspace: options.config.workspace,
@@ -46,6 +43,21 @@ export async function buildApp(
     eventHub,
     health: options.health ?? (() => ({ status: "ok" })),
   })
-  await app.ready()
+  if (!options.deferReady) await app.ready()
   return app
+}
+
+function createService(
+  options: BuildAppOptions,
+  eventHub: EventHub
+): ConversationService {
+  if (!options.repository || !options.adapter) {
+    throw new Error("repository_and_adapter_required")
+  }
+  return new ConversationService({
+    repository: options.repository,
+    adapter: options.adapter,
+    eventSink: eventHub,
+    workspace: options.config.workspace,
+  })
 }

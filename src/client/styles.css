@@ -205,6 +205,16 @@ textarea:focus-visible {
     #f3f4f2;
 }
 
+.diagnostic-error {
+  align-items: center;
+  background: #fff4e5;
+  border-bottom: 1px solid #f0c36d;
+  color: #6f4600;
+  display: flex;
+  gap: 0.6rem;
+  padding: 0.65rem 1rem;
+}
+
 .page-error {
   display: flex;
   align-items: center;
