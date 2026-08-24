@@ -1294,6 +1294,70 @@ describe("live conversation reducer", () => {
       expect(afterThirdSend).toBe(state)
     })
 
+    it("does not let an old correlated session error retire a newer accepted send", () => {
+      let state = loadedState()
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-old-session",
+        text: "旧连接问题",
+      })
+      state = conversationReducer(state, {
+        type: "sendTransportRejected",
+        conversationId: "c1",
+        requestId: "send-old-session",
+      })
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-new-session",
+        text: "新连接问题",
+      })
+      state = conversationReducer(state, {
+        type: "sendAccepted",
+        conversationId: "c1",
+        requestId: "send-new-session",
+      })
+      state = receive(
+        state,
+        1,
+        "c1",
+        { type: "turn_started", turnId: "old-session-turn" },
+        "send-old-session"
+      )
+      state = receive(
+        state,
+        2,
+        "c1",
+        {
+          type: "error",
+          code: "app_server_exited",
+          message: "Agent server exited unexpectedly.",
+          terminal: true,
+          scope: "session",
+        },
+        "send-old-session"
+      )
+
+      expect(state.liveByConversationId.c1?.sendAttempts).toEqual([
+        expect.objectContaining({
+          requestId: "send-new-session",
+          state: "accepted",
+          terminalObserved: false,
+        }),
+      ])
+      expect(state.summariesById.c1?.status).toBe("running")
+      expect(isAnyConversationRunning(state)).toBe(true)
+      expect(
+        conversationReducer(state, {
+          type: "sendOptimistic",
+          conversationId: "c1",
+          requestId: "send-third-session",
+          text: "不应被接受",
+        })
+      ).toBe(state)
+    })
+
     it("retires terminal attempt ownership even when history reconciliation fails", () => {
       let state = loadedState()
       let seq = 0

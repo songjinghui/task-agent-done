@@ -795,7 +795,10 @@ function reduceEvent(
             ? {}
             : withoutTurnText(live.textByTurnId, payload.turnId),
         },
-        { retireAllAttempts: sessionTerminal }
+        {
+          retireAllAttempts:
+            sessionTerminal && envelope.clientRequestId === undefined,
+        }
       )
       return syncSelectedDetailAfterTerminal(
         withLive(
