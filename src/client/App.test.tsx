@@ -400,8 +400,18 @@ describe("App", () => {
 
     const source = FakeEventSource.instances[0]!
     act(() => {
-      source.event(1, first.id, { type: "turn_started", turnId: "t1" })
-      source.event(2, first.id, { type: "turn_completed", turnId: "t1" })
+      source.event(
+        1,
+        first.id,
+        { type: "turn_started", turnId: "t1" },
+        "send-1"
+      )
+      source.event(
+        2,
+        first.id,
+        { type: "turn_completed", turnId: "t1" },
+        "send-1"
+      )
     })
     await user.type(input, "下一条")
     expect(screen.getByRole("button", { name: "发送" })).toBeEnabled()

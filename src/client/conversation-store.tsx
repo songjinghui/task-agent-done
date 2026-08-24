@@ -470,17 +470,18 @@ export function conversationReducer(
       ) {
         return state
       }
+      const settledAttempts = updateSendAttempt(
+        live.sendAttempts,
+        action.requestId,
+        state.streamEpoch,
+        (attempt) => ({ ...attempt, state: "accepted" })
+      ).filter((attempt) => !attempt.terminalObserved)
       return withLive(state, action.conversationId, {
         ...live,
         draft:
           live.draft === live.httpSend.submittedText ? "" : live.draft,
         httpSend: null,
-        sendAttempts: updateSendAttempt(
-          live.sendAttempts,
-          action.requestId,
-          state.streamEpoch,
-          (attempt) => ({ ...attempt, state: "accepted" })
-        ),
+        sendAttempts: settledAttempts,
         sendError: null,
       })
     }
@@ -518,7 +519,7 @@ export function conversationReducer(
             ),
         httpSend: null,
         sendAttempts: accepted
-          ? live.sendAttempts
+          ? live.sendAttempts.filter((candidate) => !candidate.terminalObserved)
           : capSendAttemptTombstones(
               updateSendAttempt(
                 live.sendAttempts,
@@ -727,29 +728,47 @@ function reduceEvent(
                 },
               ]
           : live.transientTurns
+      const nextLive = terminalLive(live, {
+        status: "idle",
+        transientTurns,
+        textByTurnId: withoutTurnText(live.textByTurnId, payload.turnId),
+      })
       return syncSelectedDetailAfterTerminal(
         withLive(
-          withSummaryStatus(stateWithSeq, conversationId, "idle"),
+          withSummaryStatus(
+            stateWithSeq,
+            conversationId,
+            nextLive.status ?? "idle"
+          ),
           conversationId,
-          terminalLive(live, { status: "idle", transientTurns })
+          nextLive
         ),
         conversationId,
         terminalDetailSyncKey(stateWithSeq, envelope)
       )
     }
-    case "turn_interrupted":
+    case "turn_interrupted": {
       if (live.activeTurnId && live.activeTurnId !== payload.turnId) {
         return stateWithSeq
       }
+      const interruptedLive = terminalLive(live, {
+        status: "interrupted",
+        textByTurnId: withoutTurnText(live.textByTurnId, payload.turnId),
+      })
       return syncSelectedDetailAfterTerminal(
         withLive(
-          withSummaryStatus(stateWithSeq, conversationId, "interrupted"),
+          withSummaryStatus(
+            stateWithSeq,
+            conversationId,
+            interruptedLive.status ?? "interrupted"
+          ),
           conversationId,
-          terminalLive(live, { status: "interrupted" })
+          interruptedLive
         ),
         conversationId,
         terminalDetailSyncKey(stateWithSeq, envelope)
       )
+    }
     case "error": {
       if (!payload.terminal) {
         return withLive(stateWithSeq, conversationId, {
@@ -766,11 +785,27 @@ function reduceEvent(
       ) {
         return stateWithSeq
       }
+      const sessionTerminal = payload.scope === "session"
+      const failedLive = terminalLive(
+        live,
+        {
+          status: "failed",
+          error: payload.message,
+          textByTurnId: sessionTerminal
+            ? {}
+            : withoutTurnText(live.textByTurnId, payload.turnId),
+        },
+        { retireAllAttempts: sessionTerminal }
+      )
       return syncSelectedDetailAfterTerminal(
         withLive(
-          withSummaryStatus(stateWithSeq, conversationId, "failed"),
+          withSummaryStatus(
+            stateWithSeq,
+            conversationId,
+            failedLive.status ?? "failed"
+          ),
           conversationId,
-          terminalLive(live, { status: "failed", error: payload.message })
+          failedLive
         ),
         conversationId,
         terminalDetailSyncKey(stateWithSeq, envelope)
@@ -943,9 +978,21 @@ function terminalDetailSyncKey(
 
 function terminalLive(
   live: LiveConversationState,
-  overrides: Partial<LiveConversationState> = {}
+  overrides: Partial<LiveConversationState> = {},
+  options: { retireAllAttempts?: boolean } = {}
 ): LiveConversationState {
-  return {
+  const sendAttempts = options.retireAllAttempts
+    ? []
+    : live.sendAttempts.filter(
+        (attempt) =>
+          !attempt.terminalObserved ||
+          (live.httpSend?.requestId === attempt.requestId &&
+            live.httpSend.epoch === attempt.epoch)
+      )
+  const hasAcceptedAttempt = sendAttempts.some(
+    (attempt) => attempt.state === "accepted" && !attempt.terminalObserved
+  )
+  const terminal = {
     ...live,
     activeTurnId: null,
     toolsById: {},
@@ -955,7 +1002,23 @@ function terminalLive(
     cancelPending: false,
     cancelRequestId: null,
     ...overrides,
+    sendAttempts,
   }
+  return {
+    ...terminal,
+    status: hasAcceptedAttempt && !options.retireAllAttempts
+      ? "running"
+      : terminal.status,
+  }
+}
+
+function withoutTurnText(
+  textByTurnId: Record<string, string>,
+  turnId: string
+): Record<string, string> {
+  if (!(turnId in textByTurnId)) return textByTurnId
+  const { [turnId]: _retired, ...remaining } = textByTurnId
+  return remaining
 }
 
 function emptyLive(): LiveConversationState {
@@ -1149,6 +1212,9 @@ export function isConversationActive(
   const live = state.liveByConversationId[conversationId]
   return Boolean(
     live?.activeTurnId ||
+      live?.sendAttempts.some(
+        (attempt) => attempt.state === "accepted" && !attempt.terminalObserved
+      ) ||
       state.summariesById[conversationId]?.status === "running"
   )
 }

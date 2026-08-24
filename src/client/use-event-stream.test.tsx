@@ -794,6 +794,7 @@ describe("live conversation reducer", () => {
 
     expect(state.liveByConversationId.c1?.httpSend).toBeNull()
     expect(state.liveByConversationId.c1?.draft).toBe("")
+    expect(state.liveByConversationId.c1?.sendAttempts).toEqual([])
     expect(state.summariesById.c1?.status).toBe("idle")
   })
 
@@ -1232,6 +1233,158 @@ describe("live conversation reducer", () => {
         selectDisplayedTurns(state, "c1").map((turn) => turn.text)
       ).toEqual(["重连后问题"])
       expect(isAnyConversationRunning(state)).toBe(true)
+    })
+
+    it("does not let an old terminal event unlock a newer accepted send", () => {
+      let state = loadedState()
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-old-terminal",
+        text: "旧问题",
+      })
+      state = conversationReducer(state, {
+        type: "sendTransportRejected",
+        conversationId: "c1",
+        requestId: "send-old-terminal",
+      })
+      state = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-new-accepted",
+        text: "新问题",
+      })
+      state = conversationReducer(state, {
+        type: "sendAccepted",
+        conversationId: "c1",
+        requestId: "send-new-accepted",
+      })
+
+      state = receive(
+        state,
+        1,
+        "c1",
+        { type: "turn_started", turnId: "old-turn" },
+        "send-old-terminal"
+      )
+      state = receive(
+        state,
+        2,
+        "c1",
+        { type: "turn_completed", turnId: "old-turn" },
+        "send-old-terminal"
+      )
+
+      expect(state.summariesById.c1?.status).toBe("running")
+      expect(isAnyConversationRunning(state)).toBe(true)
+      expect(state.liveByConversationId.c1?.sendAttempts).toEqual([
+        expect.objectContaining({
+          requestId: "send-new-accepted",
+          state: "accepted",
+          terminalObserved: false,
+        }),
+      ])
+
+      const afterThirdSend = conversationReducer(state, {
+        type: "sendOptimistic",
+        conversationId: "c1",
+        requestId: "send-third",
+        text: "不应被接受",
+      })
+      expect(afterThirdSend).toBe(state)
+    })
+
+    it("retires terminal attempt ownership even when history reconciliation fails", () => {
+      let state = loadedState()
+      let seq = 0
+      for (let index = 1; index <= 20; index += 1) {
+        const requestId = `send-terminal-${index}`
+        const turnId = `turn-terminal-${index}`
+        state = conversationReducer(state, {
+          type: "sendOptimistic",
+          conversationId: "c1",
+          requestId,
+          text: `问题 ${index}`,
+        })
+        state = conversationReducer(state, {
+          type: "sendAccepted",
+          conversationId: "c1",
+          requestId,
+        })
+        state = receive(
+          state,
+          ++seq,
+          "c1",
+          { type: "turn_started", turnId },
+          requestId
+        )
+        state = receive(
+          state,
+          ++seq,
+          "c1",
+          { type: "turn_completed", turnId },
+          requestId
+        )
+        state = conversationReducer(state, {
+          type: "detailRequested",
+          conversationId: "c1",
+          requestId: index,
+        })
+        state = conversationReducer(state, {
+          type: "detailFailed",
+          conversationId: "c1",
+          requestId: index,
+          message: "历史暂不可用",
+        })
+      }
+
+      expect(state.liveByConversationId.c1?.sendAttempts).toEqual([])
+      expect(selectDisplayedTurns(state, "c1")).toHaveLength(20)
+      expect(isAnyConversationRunning(state)).toBe(false)
+    })
+
+    it("releases completed live text buffers after moving them into transient history", () => {
+      let state = loadedState()
+      let seq = 0
+      for (let index = 1; index <= 20; index += 1) {
+        const turnId = `buffered-turn-${index}`
+        state = receive(state, ++seq, "c1", {
+          type: "turn_started",
+          turnId,
+        })
+        state = receive(state, ++seq, "c1", {
+          type: "text_delta",
+          turnId,
+          text: "x".repeat(100_000),
+        })
+        state = receive(state, ++seq, "c1", {
+          type: "turn_completed",
+          turnId,
+        })
+        state = conversationReducer(state, {
+          type: "detailRequested",
+          conversationId: "c1",
+          requestId: index,
+        })
+        state = conversationReducer(state, {
+          type: "detailSucceeded",
+          conversationId: "c1",
+          requestId: index,
+          detail: {
+            conversationId: "c1",
+            turns: [
+              {
+                id: `history-${index}`,
+                role: "assistant",
+                text: "done",
+                status: "completed",
+              },
+            ],
+          },
+        })
+      }
+
+      expect(state.liveByConversationId.c1?.textByTurnId).toEqual({})
     })
   })
 })
