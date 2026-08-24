@@ -93,6 +93,17 @@ type RunningTool = {
 
 const COMMAND_LABEL = "运行命令"
 const FILE_CHANGE_LABEL = "修改文件"
+const GENERIC_TOOL_LABEL = "使用工具"
+const NON_TOOL_ITEM_TYPES = new Set([
+  "agentMessage",
+  "contextCompaction",
+  "enteredReviewMode",
+  "exitedReviewMode",
+  "hookPrompt",
+  "plan",
+  "reasoning",
+  "userMessage",
+])
 
 export class CodexAppServerAdapter implements AgentAdapter {
   readonly #client: CodexJsonRpcClient
@@ -677,14 +688,14 @@ function historyStatus(status: unknown): MessageTurn["status"] {
 
 function normalizeTool(item: Record<string, unknown>, started: boolean): ToolStatus | undefined {
   const id = stringField(item, "id")
-  if (!id) return undefined
+  const type = stringField(item, "type")
+  if (!id || !type || NON_TOOL_ITEM_TYPES.has(type)) return undefined
   const label =
-    item.type === "commandExecution"
+    type === "commandExecution"
       ? COMMAND_LABEL
-      : item.type === "fileChange"
+      : type === "fileChange"
         ? FILE_CHANGE_LABEL
-        : undefined
-  if (!label) return undefined
+        : GENERIC_TOOL_LABEL
 
   return {
     id,

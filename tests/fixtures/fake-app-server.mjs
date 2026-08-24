@@ -120,6 +120,24 @@ function driveTurn(turn) {
     process.exit(17)
   }
   if (turn.prompt.includes("[crash]")) process.exit(17)
+  if (turn.prompt.includes("[generic-tool]")) {
+    const item = {
+      id: `generic_${turn.id}`,
+      type: "mcpToolCall",
+      server: "private-mcp-server",
+      tool: "secret-tool-name",
+      arguments: { path: "/private/secret.txt" },
+      status: "inProgress",
+    }
+    turn.genericItem = item
+    notification("item/started", {
+      threadId: turn.threadId,
+      turnId: turn.id,
+      item,
+    })
+    requestApproval(turn, "item/commandExecution/requestApproval")
+    return
+  }
   if (turn.prompt.includes("[tool]") && turn.prompt.includes("[approval]")) {
     const completedItem = {
       id: `tool_${turn.id}`,
@@ -292,10 +310,35 @@ function handleResponse(message) {
   if (!turn) return
   approvalRequests.delete(message.id)
   turn.approval = Object.hasOwn(message, "result") ? message.result : message.error
+  if (turn.genericItem && !turn.genericCompleted) {
+    const completedItem = { ...turn.genericItem, status: "completed" }
+    turn.genericCompleted = true
+    turn.completedTools = [completedItem]
+    notification("item/completed", {
+      threadId: turn.threadId,
+      turnId: turn.id,
+      item: completedItem,
+    })
+    const finishItem = {
+      id: `finish_${turn.id}`,
+      type: "commandExecution",
+      command: "printf finish",
+    }
+    turn.approvalItem = finishItem
+    turn.finalText = "generic tool complete"
+    notification("item/started", {
+      threadId: turn.threadId,
+      turnId: turn.id,
+      item: finishItem,
+    })
+    requestApproval(turn, "item/commandExecution/requestApproval")
+    return
+  }
   const accepted = turn.approval?.decision === "accept"
   const item = { ...turn.approvalItem, status: accepted ? "completed" : "declined" }
   notification("item/completed", { threadId: turn.threadId, turnId: turn.id, item })
-  const text = accepted ? "approval accepted" : "approval declined"
+  const text =
+    turn.finalText ?? (accepted ? "approval accepted" : "approval declined")
   notification("item/agentMessage/delta", {
     threadId: turn.threadId,
     turnId: turn.id,

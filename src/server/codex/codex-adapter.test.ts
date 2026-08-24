@@ -163,6 +163,119 @@ describe("CodexAppServerAdapter", () => {
     ])
   })
 
+  it("normalizes an unknown tool lifecycle with one sanitized generic identity", async () => {
+    const { adapter, events, fake } = setup()
+    fake.enqueue("turn/start", { turn: { id: "turn_1" } })
+    await adapter.sendText("thr_1", "seed", "operation-1")
+    const rawTool = {
+      type: "futureSecretTool",
+      id: "generic_1",
+      path: "/private/workspace/secret.txt",
+      command: "cat /private/token",
+      payload: { token: "raw-secret" },
+    }
+
+    fake.emit(
+      notification("item/started", {
+        threadId: "thr_1",
+        turnId: "turn_1",
+        item: { ...rawTool, status: "inProgress" },
+      })
+    )
+    fake.emit(
+      notification("item/completed", {
+        threadId: "thr_1",
+        turnId: "turn_1",
+        item: { ...rawTool, status: "completed" },
+      })
+    )
+
+    expect(events).toEqual([
+      event("thr_1", {
+        type: "tool_status",
+        tool: { id: "generic_1", label: "使用工具", status: "running" },
+      }, "operation-1"),
+      event("thr_1", {
+        type: "tool_status",
+        tool: { id: "generic_1", label: "使用工具", status: "completed" },
+      }, "operation-1"),
+    ])
+    expect(JSON.stringify(events)).not.toMatch(
+      /futureSecretTool|secret\.txt|private\/token|raw-secret/
+    )
+  })
+
+  it.each([
+    "agentMessage",
+    "userMessage",
+    "reasoning",
+    "plan",
+    "hookPrompt",
+    "enteredReviewMode",
+    "exitedReviewMode",
+    "contextCompaction",
+  ])("does not render %s items as tools", async (type) => {
+    const { adapter, events, fake } = setup()
+    fake.enqueue("turn/start", { turn: { id: "turn_1" } })
+    await adapter.sendText("thr_1", "seed", "operation-1")
+
+    fake.emit(
+      notification("item/started", {
+        threadId: "thr_1",
+        turnId: "turn_1",
+        item: { type, id: `excluded_${type}`, status: "inProgress" },
+      })
+    )
+    fake.emit(
+      notification("item/completed", {
+        threadId: "thr_1",
+        turnId: "turn_1",
+        item: { type, id: `excluded_${type}`, status: "completed" },
+      })
+    )
+
+    expect(events).toEqual([])
+  })
+
+  it("fails a still-running generic tool when its turn terminates", async () => {
+    const { adapter, events, fake } = setup()
+    fake.enqueue("turn/start", { turn: { id: "turn_1" } })
+    await adapter.sendText("thr_1", "seed", "operation-1")
+
+    fake.emit(
+      notification("item/started", {
+        threadId: "thr_1",
+        turnId: "turn_1",
+        item: {
+          type: "mcpToolCall",
+          id: "generic_running",
+          server: "private-server",
+          tool: "private-tool",
+        },
+      })
+    )
+    fake.emit(
+      notification("turn/completed", {
+        threadId: "thr_1",
+        turn: { id: "turn_1", status: "failed", items: [] },
+      })
+    )
+
+    expect(
+      events.filter(({ payload }) => payload.type === "tool_status")
+    ).toEqual([
+      event("thr_1", {
+        type: "tool_status",
+        tool: { id: "generic_running", label: "使用工具", status: "running" },
+      }, "operation-1"),
+      event("thr_1", {
+        type: "tool_status",
+        tool: { id: "generic_running", label: "使用工具", status: "failed" },
+      }, "operation-1"),
+    ])
+    expect(JSON.stringify(events)).not.toMatch(/private-server|private-tool/)
+  })
+
   it("maps session methods and projects only user and assistant history", async () => {
     const { adapter, fake } = setup()
     fake.enqueue("thread/start", { thread: { id: "thr_1" } })

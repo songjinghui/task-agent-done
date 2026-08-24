@@ -70,6 +70,25 @@ test("renders command tools and handles both approval decisions", async ({
   await expect(page.getByLabel("Assistant 消息").last()).toContainText("approval declined")
 })
 
+test("shows one sanitized generic tool identity from running through completed", async ({
+  page,
+  taskmux,
+}) => {
+  await page.goto(taskmux.address)
+  await createConversation(page)
+
+  await send(page, "[generic-tool]")
+  await expect(page.getByLabel("工具状态")).toContainText("使用工具：运行中")
+  await page.getByRole("button", { name: "批准" }).click()
+  await expect(page.getByLabel("工具状态")).toContainText("使用工具：完成")
+  await expect(page.getByRole("button", { name: "批准" })).toBeEnabled()
+  await page.getByRole("button", { name: "批准" }).click()
+  await expect(page.getByLabel("Assistant 消息")).toContainText(
+    "generic tool complete"
+  )
+  await expect(page.getByText(/private|mcpToolCall|secret/i)).toHaveCount(0)
+})
+
 test("rejects a second turn with 409 and cancels the active turn", async ({
   page,
   taskmux,
