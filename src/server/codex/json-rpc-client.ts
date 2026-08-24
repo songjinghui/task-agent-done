@@ -63,7 +63,7 @@ export class CodexJsonRpcClient {
       if (!isRecord(initializeResult)) {
         throw new Error("invalid_initialize_response")
       }
-      this.#write({ jsonrpc: "2.0", method: "initialized", params: {} })
+      this.#write({ method: "initialized", params: {} })
       this.#state = "started"
     } catch (error) {
       this.#state = "stopped"
@@ -103,7 +103,7 @@ export class CodexJsonRpcClient {
       })
 
       try {
-        this.#write({ jsonrpc: "2.0", id, method, params })
+        this.#write({ id, method, params })
       } catch (error) {
         clearTimeout(timeout)
         this.#pendingRequests.delete(id)
@@ -113,7 +113,7 @@ export class CodexJsonRpcClient {
   }
 
   respond(id: JsonRpcId, result: unknown = null): void {
-    this.#write({ jsonrpc: "2.0", id, result })
+    this.#write({ id, result })
   }
 
   subscribe(listener: CodexJsonRpcClientListener): () => void {
@@ -223,7 +223,10 @@ export class CodexJsonRpcClient {
       this.#emit({ type: "protocol_error", message: "invalid_json", raw: line })
       return
     }
-    if (!isRecord(message) || message.jsonrpc !== "2.0") {
+    if (
+      !isRecord(message) ||
+      (Object.hasOwn(message, "jsonrpc") && message.jsonrpc !== "2.0")
+    ) {
       this.#emit({ type: "protocol_error", message: "invalid_json_rpc_message", raw: line })
       return
     }

@@ -4,6 +4,7 @@ import { join } from "node:path"
 import readline from "node:readline"
 
 let initialized = false
+const currentJsonl = process.argv.includes("--current-jsonl")
 const statePath = join(process.cwd(), ".taskmux-fake-history.json")
 const state = loadState()
 const turns = new Map()
@@ -27,7 +28,7 @@ function saveState() {
 }
 
 function send(message) {
-  const serialized = `${JSON.stringify(message)}\n`
+  const serialized = `${JSON.stringify(currentJsonl ? withoutJsonRpc(message) : message)}\n`
   if (splitOutput) {
     queuedOutput.push(serialized)
     return
@@ -36,7 +37,7 @@ function send(message) {
 }
 
 function sendSplit(message) {
-  const serialized = `${JSON.stringify(message)}\n`
+  const serialized = `${JSON.stringify(currentJsonl ? withoutJsonRpc(message) : message)}\n`
   const middle = Math.ceil(serialized.length / 2)
   splitOutput = true
   process.stdout.write(serialized.slice(0, middle))
@@ -45,6 +46,11 @@ function sendSplit(message) {
     splitOutput = false
     for (const queued of queuedOutput.splice(0)) process.stdout.write(queued)
   }, 0)
+}
+
+function withoutJsonRpc(message) {
+  const { jsonrpc, ...currentMessage } = message
+  return currentMessage
 }
 
 function respond(id, result) {
@@ -227,6 +233,7 @@ function driveTurn(turn) {
 function handleRequest(message) {
   if (message.method === "initialize") {
     if (process.argv.includes("--ignore-initialize")) return
+    if (currentJsonl && Object.hasOwn(message, "jsonrpc")) return
     sendSplit({
       jsonrpc: "2.0",
       id: message.id,
@@ -295,8 +302,17 @@ function handleRequest(message) {
     respond(message.id, { ok: true })
     return
   }
+  if (message.method === "test/invalid-version") {
+    send({ jsonrpc: "1.0", method: "test/invalid-version" })
+    respond(message.id, { ok: true })
+    return
+  }
   if (message.method === "test/stderr") {
     process.stderr.write("fake app-server diagnostic\n")
+    respond(message.id, { ok: true })
+    return
+  }
+  if (message.method === "test/current-envelope") {
     respond(message.id, { ok: true })
     return
   }
@@ -341,7 +357,7 @@ input.on("line", (line) => {
     process.stderr.write("invalid client JSON\n")
     return
   }
-  if (message?.jsonrpc !== "2.0") return
+  if (Object.hasOwn(message ?? {}, "jsonrpc") && message.jsonrpc !== "2.0") return
   if (typeof message.method === "string") {
     if (Object.hasOwn(message, "id")) handleRequest(message)
     if (message.method === "initialized") initialized = true

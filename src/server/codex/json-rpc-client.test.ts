@@ -102,6 +102,22 @@ describe("CodexJsonRpcClient", () => {
     ).rejects.toThrow("app_server_request_timeout")
   })
 
+  it("uses the current Codex JSONL envelope without a jsonrpc member", async () => {
+    const workspace = createWorkspace()
+    const client = new CodexJsonRpcClient({
+      command: process.execPath,
+      args: [fixturePath, "--current-jsonl"],
+      cwd: workspace,
+    })
+    clients.push(client)
+
+    await client.start(
+      { name: "taskmux", title: "TaskMux", version: "0.1.0" },
+      100
+    )
+    await expect(client.request("test/current-envelope")).resolves.toEqual({ ok: true })
+  })
+
   it("delivers item notifications from an in-memory hello turn", async () => {
     const { client, workspace } = await startClient()
     const thread = await client.request<{ thread: { id: string } }>("thread/start", {
@@ -144,6 +160,24 @@ describe("CodexJsonRpcClient", () => {
     await expect(protocolError).resolves.toMatchObject({
       type: "protocol_error",
       raw: "{not valid JSON}",
+    })
+  })
+
+  it("rejects explicit non-current JSON-RPC versions without notifying subscribers", async () => {
+    const { client } = await startClient()
+    const events: CodexJsonRpcClientEvent[] = []
+    client.subscribe((event) => events.push(event))
+
+    await expect(client.request("test/invalid-version")).resolves.toEqual({ ok: true })
+
+    expect(events).toContainEqual({
+      type: "protocol_error",
+      message: "invalid_json_rpc_message",
+      raw: '{"jsonrpc":"1.0","method":"test/invalid-version"}',
+    })
+    expect(events).not.toContainEqual({
+      type: "notification",
+      method: "test/invalid-version",
     })
   })
 
