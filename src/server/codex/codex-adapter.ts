@@ -139,15 +139,28 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   async readSession(externalSessionId: string): Promise<MessageTurn[]> {
-    const response = await this.#client.request<CodexThreadResponse>("thread/read", {
-      threadId: externalSessionId,
-      includeTurns: true,
-    })
-    return projectHistory(requireThread(response))
+    try {
+      const response = await this.#client.request<CodexThreadResponse>(
+        "thread/read",
+        { threadId: externalSessionId, includeTurns: true }
+      )
+      return projectHistory(requireThread(response))
+    } catch {
+      // Codex 0.147.0 rejects includeTurns before the first user message
+      // ("thread is not materialized yet"). A fresh thread has no history, so
+      // confirm the thread still exists and report empty history.
+      const response = await this.#client.request<CodexThreadResponse>(
+        "thread/read",
+        { threadId: externalSessionId }
+      )
+      requireThread(response)
+      return []
+    }
   }
 
-  async resumeSession(externalSessionId: string): Promise<void> {
-    await this.#client.request("thread/resume", { threadId: externalSessionId })
+  async resumeSession(_externalSessionId: string): Promise<void> {
+    // Codex 0.147.0 starts a thread ready for direct input; turn/start accepts
+    // a threadId directly, so there is no separate resume step to perform.
   }
 
   async sendText(

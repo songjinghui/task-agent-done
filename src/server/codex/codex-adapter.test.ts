@@ -401,8 +401,6 @@ describe("CodexAppServerAdapter", () => {
         ],
       },
     })
-    fake.enqueue("thread/resume", { thread: { id: "thr_1" } })
-
     await expect(adapter.createSession("/workspace")).resolves.toEqual({
       externalSessionId: "thr_1",
     })
@@ -428,7 +426,22 @@ describe("CodexAppServerAdapter", () => {
         method: "thread/read",
         params: { threadId: "thr_1", includeTurns: true },
       },
-      { method: "thread/resume", params: { threadId: "thr_1" } },
+    ])
+  })
+
+  it("returns empty history when a fresh thread rejects includeTurns", async () => {
+    const { adapter, fake } = setup()
+    fake.enqueue(
+      "thread/read",
+      Promise.reject(new Error("thread thr_1 is not materialized yet"))
+    )
+    fake.enqueue("thread/read", { thread: { id: "thr_1" } })
+
+    await expect(adapter.readSession("thr_1")).resolves.toEqual([])
+
+    expect(fake.requests).toEqual([
+      { method: "thread/read", params: { threadId: "thr_1", includeTurns: true } },
+      { method: "thread/read", params: { threadId: "thr_1" } },
     ])
   })
 
