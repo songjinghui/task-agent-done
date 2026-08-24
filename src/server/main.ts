@@ -333,14 +333,12 @@ export async function configureTaskMuxFrontend(
     staticRoot?: string
   } = {}
 ): Promise<void | (() => Promise<void>)> {
-  app.setNotFoundHandler(async (request, reply) => {
-    if (request.method === "GET" && !isApiUrl(request.url)) {
-      if (!dev) return reply.sendFile("index.html")
-    }
-    return reply.code(404).send({
+  const apiNotFound = async (_request: unknown, reply: import("fastify").FastifyReply) =>
+    reply.code(404).send({
       error: { code: "route_not_found", message: "Route not found." },
     })
-  })
+  app.all("/api", apiNotFound)
+  app.all("/api/*", apiNotFound)
 
   if (dev) {
     const [{ default: middie }, viteModule] = await Promise.all([
@@ -376,6 +374,7 @@ export async function configureTaskMuxFrontend(
       dependencies.staticRoot ?? resolve(moduleDirectory, "../../dist/client"),
     wildcard: false,
   })
+  app.get("/*", async (_request, reply) => reply.sendFile("index.html"))
 }
 
 function isApiUrl(url: string): boolean {
