@@ -14,23 +14,42 @@ import { Sidebar } from "./components/Sidebar.js"
 import { Thread } from "./components/Thread.js"
 
 const browserApi = createTaskMuxApi()
+const DEFAULT_HEALTH_POLL_INTERVAL_MS = 5_000
 
-export function App({ api = browserApi }: { api?: TaskMuxApi }): ReactNode {
+export function App({
+  api = browserApi,
+  healthPollIntervalMs = DEFAULT_HEALTH_POLL_INTERVAL_MS,
+}: {
+  api?: TaskMuxApi
+  healthPollIntervalMs?: number
+}): ReactNode {
   const [diagnosticAction, setDiagnosticAction] = useState<string | null>(null)
 
   useEffect(() => {
     let current = true
-    void api.getHealth().then(
-      (health) => {
-        if (!current || health.status === "ok") return
-        setDiagnosticAction(DIAGNOSTIC_ACTIONS[health.error.code] ?? null)
-      },
-      () => {}
-    )
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = async () => {
+      try {
+        const health = await api.getHealth()
+        if (current) {
+          setDiagnosticAction(
+            health.status === "degraded"
+              ? DIAGNOSTIC_ACTIONS[health.error.code] ?? null
+              : null
+          )
+        }
+      } catch {
+        // Keep the last known diagnostic while health is temporarily unreachable.
+      } finally {
+        if (current) timer = setTimeout(poll, healthPollIntervalMs)
+      }
+    }
+    void poll()
     return () => {
       current = false
+      if (timer) clearTimeout(timer)
     }
-  }, [api])
+  }, [api, healthPollIntervalMs])
 
   return (
     <ConversationProvider api={api}>
@@ -43,6 +62,7 @@ const DIAGNOSTIC_ACTIONS: Readonly<Record<string, string>> = {
   codex_not_found: "安装 Codex CLI",
   codex_version_unsupported: "更新 Codex CLI",
   codex_not_authenticated: "运行 codex login",
+  app_server_exited: "重启 TaskMux",
 }
 
 function Workspace({

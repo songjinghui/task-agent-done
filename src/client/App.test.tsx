@@ -31,6 +31,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
   vi.unstubAllGlobals()
 })
 
@@ -39,6 +40,7 @@ describe("App", () => {
     ["codex_not_found", "安装 Codex CLI"],
     ["codex_version_unsupported", "更新 Codex CLI"],
     ["codex_not_authenticated", "运行 codex login"],
+    ["app_server_exited", "重启 TaskMux"],
   ])("shows a stable action for %s without provider diagnostics", async (code, action) => {
     render(
       <App
@@ -59,6 +61,43 @@ describe("App", () => {
     )
     expect(document.body).not.toHaveTextContent("stderr")
     expect(document.body).not.toHaveTextContent("/private/provider/path")
+  })
+
+  it("polls health after a later second crash and stops polling after cleanup", async () => {
+    vi.useFakeTimers()
+    const getHealth = vi
+      .fn<TaskMuxApi["getHealth"]>()
+      .mockResolvedValueOnce({ status: "ok" })
+      .mockResolvedValue({
+        status: "degraded",
+        error: {
+          code: "app_server_exited",
+          message: "secret stderr from second crash",
+        },
+      })
+    const view = render(
+      <App
+        api={fakeApi({ getHealth })}
+        healthPollIntervalMs={50}
+      />
+    )
+    await act(async () => {})
+    expect(getHealth).toHaveBeenCalledOnce()
+    expect(screen.queryByRole("alert", { name: "Codex 诊断" })).toBeNull()
+
+    await act(async () => {
+      vi.advanceTimersByTime(50)
+      await Promise.resolve()
+    })
+
+    expect(getHealth).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole("alert", { name: "Codex 诊断" })).toHaveTextContent(
+      "重启 TaskMux"
+    )
+    expect(document.body).not.toHaveTextContent("secret stderr")
+    view.unmount()
+    vi.advanceTimersByTime(500)
+    expect(getHealth).toHaveBeenCalledTimes(2)
   })
 
   it("shows loading before rendering the workspace and conversation navigation", async () => {

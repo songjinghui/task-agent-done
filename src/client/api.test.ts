@@ -121,6 +121,32 @@ describe("TaskMux API", () => {
     })
   })
 
+  it("decodes a sanitized degraded health DTO from its expected 503 response", async () => {
+    const api = createTaskMuxApi(
+      vi.fn<typeof fetch>(async () =>
+        jsonResponse(
+          {
+            status: "degraded",
+            error: {
+              code: "app_server_exited",
+              message: "raw provider detail must be discarded",
+              stderr: "secret stderr",
+            },
+          },
+          503
+        )
+      )
+    )
+
+    await expect(api.getHealth()).resolves.toEqual({
+      status: "degraded",
+      error: {
+        code: "app_server_exited",
+        message: "raw provider detail must be discarded",
+      },
+    })
+  })
+
   it("sanitizes valid DTOs instead of exposing unknown server fields", async () => {
     const api = createTaskMuxApi(
       sequenceFetcher([

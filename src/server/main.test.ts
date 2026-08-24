@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import Fastify, { type FastifyInstance } from "fastify"
+import type { DatabaseSync } from "node:sqlite"
 import type {
   ApprovalDecision,
   ConversationEvent,
@@ -133,6 +134,22 @@ describe("startTaskMux", () => {
     await running.shutdown()
   })
 
+  it("does not reset restart budget for a current adapter completion rejected by the service", async () => {
+    const harness = makeRuntimeHarness()
+    const running = await startTaskMux(makeConfig(), harness.dependencies)
+    await running.service.create()
+
+    harness.clients[0]!.emitExit()
+    await expect.poll(() => harness.clients.length).toBe(2)
+    harness.adapters[1]!.complete("thr-1")
+    harness.clients[1]!.emitExit()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(harness.clients).toHaveLength(2)
+    expect(running.health()).toMatchObject({ status: "degraded" })
+    await running.shutdown()
+  })
+
   it("shuts down idempotently, cancels active work, stops the client, and removes signal handlers", async () => {
     const signals = new FakeSignals()
     const harness = makeRuntimeHarness({ signals })
@@ -150,6 +167,158 @@ describe("startTaskMux", () => {
     expect(harness.clients[0]!.stopCalls).toBe(1)
     expect(signals.count("SIGINT")).toBe(0)
     expect(signals.count("SIGTERM")).toBe(0)
+  })
+
+  it("rolls back client, frontend, app, database, and listeners when listen fails", async () => {
+    const config = makeConfig()
+    const database = openDatabase(join(config.dataDir, "taskmux.sqlite"))
+    const closeDatabase = vi.spyOn(database, "close")
+    const closeFrontend = vi.fn(async () => {})
+    const closeApp = vi.fn(async () => {})
+    const signals = new FakeSignals()
+    const harness = makeRuntimeHarness({ signals })
+    const listenError = Object.assign(new Error("address already in use"), {
+      code: "EADDRINUSE",
+    })
+
+    await expect(
+      startTaskMux(config, {
+        ...harness.dependencies,
+        openDatabase: () => database,
+        configureFrontend: async (app) => {
+          app.addHook("onClose", closeApp)
+          return closeFrontend
+        },
+        listen: async () => {
+          throw listenError
+        },
+      })
+    ).rejects.toBe(listenError)
+
+    const databaseCloseCalls = closeDatabase.mock.calls.length
+    if (databaseCloseCalls === 0) database.close()
+    expect(databaseCloseCalls).toBe(1)
+    expect(closeApp).toHaveBeenCalledOnce()
+    expect(closeFrontend).toHaveBeenCalledOnce()
+    expect(harness.clients[0]!.stopCalls).toBe(1)
+    expect(harness.clients[0]!.listeners.size).toBe(0)
+    expect(signals.count("SIGINT")).toBe(0)
+    expect(signals.count("SIGTERM")).toBe(0)
+  })
+
+  it("rolls back the database when diagnostics throw after it opens", async () => {
+    const config = makeConfig()
+    const database = openDatabase(join(config.dataDir, "taskmux.sqlite"))
+    const closeDatabase = vi.spyOn(database, "close")
+    const diagnosticError = new Error("diagnostic runner failed")
+
+    await expect(
+      startTaskMux(config, {
+        openDatabase: () => database,
+        diagnose: async () => {
+          throw diagnosticError
+        },
+      })
+    ).rejects.toBe(diagnosticError)
+
+    const databaseCloseCalls = closeDatabase.mock.calls.length
+    if (databaseCloseCalls === 0) database.close()
+    expect(databaseCloseCalls).toBe(1)
+  })
+
+  it("closes a migrated database when repository composition fails", async () => {
+    const compositionError = new Error("repository composition failed")
+    const close = vi.fn()
+    const database = {
+      prepare() {
+        throw compositionError
+      },
+      close,
+    } as unknown as DatabaseSync
+
+    await expect(
+      startTaskMux(makeConfig(), { openDatabase: () => database })
+    ).rejects.toBe(compositionError)
+
+    expect(close).toHaveBeenCalledOnce()
+  })
+
+  it("rolls back an unclassified App Server start failure", async () => {
+    const config = makeConfig()
+    const database = openDatabase(join(config.dataDir, "taskmux.sqlite"))
+    const closeDatabase = vi.spyOn(database, "close")
+    const startError = new Error("unexpected transport construction failure")
+    const harness = makeRuntimeHarness({ startErrors: [startError] })
+
+    await expect(
+      startTaskMux(config, {
+        ...harness.dependencies,
+        openDatabase: () => database,
+      })
+    ).rejects.toBe(startError)
+
+    const databaseCloseCalls = closeDatabase.mock.calls.length
+    if (databaseCloseCalls === 0) database.close()
+    expect(databaseCloseCalls).toBe(1)
+    expect(harness.clients[0]!.stopCalls).toBeGreaterThanOrEqual(1)
+    expect(harness.clients[0]!.listeners.size).toBe(0)
+  })
+
+  it("stops a restarting client and waits for its pending initialize before closing the database", async () => {
+    const restartStart = deferred<void>()
+    const config = makeConfig()
+    const database = openDatabase(join(config.dataDir, "taskmux.sqlite"))
+    const closeDatabase = vi.spyOn(database, "close")
+    const harness = makeRuntimeHarness({ startGates: [undefined, restartStart] })
+    const running = await startTaskMux(config, {
+      ...harness.dependencies,
+      openDatabase: () => database,
+    })
+
+    harness.clients[0]!.emitExit()
+    await expect.poll(() => harness.clients.length).toBe(2)
+    let shutdownSettled = false
+    const shutdown = running.shutdown().then(() => {
+      shutdownSettled = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    const stopCallsBeforeInitializeSettled = harness.clients[1]!.stopCalls
+    const databaseCallsBeforeInitializeSettled = closeDatabase.mock.calls.length
+
+    restartStart.resolve()
+    await shutdown
+
+    expect(stopCallsBeforeInitializeSettled).toBe(1)
+    expect(databaseCallsBeforeInitializeSettled).toBe(0)
+    expect(shutdownSettled).toBe(true)
+    expect(closeDatabase).toHaveBeenCalledOnce()
+    expect(harness.clients[1]!.listeners.size).toBe(0)
+    expect(harness.listen).toHaveBeenCalledOnce()
+  })
+
+  it("removes the first signal listener when the second registration fails", async () => {
+    const registered = new FakeSignals()
+    const signalError = new Error("signal registration failed")
+    const removalError = new Error("signal removal failed")
+    const signals: RuntimeSignalSource = {
+      on(signal, handler) {
+        if (signal === "SIGTERM") throw signalError
+        registered.on(signal, handler)
+      },
+      off(signal, handler) {
+        registered.off(signal, handler)
+        if (signal === "SIGINT") throw removalError
+      },
+    }
+    const harness = makeRuntimeHarness({ signals })
+
+    await expect(
+      startTaskMux(makeConfig(), harness.dependencies)
+    ).rejects.toBe(signalError)
+
+    expect(registered.count("SIGINT")).toBe(0)
+    expect(harness.clients[0]!.stopCalls).toBe(1)
+    expect(harness.clients[0]!.listeners.size).toBe(0)
   })
 
   it.each([true, false])("injects the %s frontend mode without starting real Vite", async (dev) => {
@@ -191,18 +360,16 @@ describe("configureTaskMuxFrontend", () => {
     await app.close()
   })
 
-  it("uses injected Vite middleware in development and keeps API routing", async () => {
+  it("keeps known and missing API paths out of Vite middleware", async () => {
     const app = Fastify({ logger: false })
     app.get("/api/known", async () => ({ ok: true }))
     const close = vi.fn(async () => {})
+    const viteRequests: string[] = []
     const cleanup = await configureTaskMuxFrontend(app, true, {
       createViteServer: async () => ({
         close,
-        middlewares(request, response, next) {
-          if (request.url?.startsWith("/api/")) {
-            next()
-            return
-          }
+        middlewares(request, response) {
+          viteRequests.push(request.url ?? "")
           response.statusCode = 200
           response.end("development shell")
         },
@@ -212,9 +379,38 @@ describe("configureTaskMuxFrontend", () => {
     const navigation = await app.inject({ method: "GET", url: "/conversation/one" })
     expect(navigation.body).toBe("development shell")
     expect((await app.inject({ method: "GET", url: "/api/known" })).json()).toEqual({ ok: true })
+    expect((await app.inject({ method: "GET", url: "/api/missing" })).json()).toEqual({
+      error: { code: "route_not_found", message: "Route not found." },
+    })
+    expect((await app.inject({ method: "GET", url: "/api?check=1" })).json()).toEqual({
+      error: { code: "route_not_found", message: "Route not found." },
+    })
+    expect(viteRequests).toEqual(["/conversation/one"])
     await cleanup?.()
     expect(close).toHaveBeenCalledOnce()
     await app.close()
+  })
+
+  it("closes an acquired Vite server when middleware registration fails", async () => {
+    const app = Fastify({ logger: false })
+    const registrationError = new Error("middleware registration failed")
+    vi.spyOn(app, "register").mockImplementationOnce(() => {
+      throw registrationError
+    })
+    const close = vi.fn(async () => {})
+
+    await expect(
+      configureTaskMuxFrontend(app, true, {
+        createViteServer: async () => ({
+          close,
+          middlewares(_request, _response, next) {
+            next()
+          },
+        }),
+      })
+    ).rejects.toBe(registrationError)
+
+    expect(close).toHaveBeenCalledOnce()
   })
 })
 
@@ -222,9 +418,13 @@ class FakeClient implements RuntimeCodexClient {
   readonly listeners = new Set<(event: CodexJsonRpcClientEvent) => void>()
   stopCalls = 0
 
-  constructor(readonly startError?: Error) {}
+  constructor(
+    readonly startError?: Error,
+    readonly startGate?: Deferred<void>
+  ) {}
 
   async start(_clientInfo: CodexClientInfo): Promise<void> {
+    await this.startGate?.promise
     if (this.startError) throw this.startError
   }
 
@@ -250,9 +450,10 @@ class FakeAdapter implements AgentAdapter {
   readonly active = new Set<string>()
   readonly cancelCalls: string[] = []
   nextTurn = 1
+  readonly unsubscribeClient: () => void
 
   constructor(client: FakeClient) {
-    client.subscribe((event) => {
+    this.unsubscribeClient = client.subscribe((event) => {
       if (event.type !== "exit") return
       for (const externalSessionId of [...this.active]) {
         this.emit(externalSessionId, {
@@ -265,6 +466,10 @@ class FakeAdapter implements AgentAdapter {
       }
       this.active.clear()
     })
+  }
+
+  dispose(): void {
+    this.unsubscribeClient()
   }
 
   async createSession(): Promise<{ externalSessionId: string }> {
@@ -321,6 +526,7 @@ class FakeSignals implements RuntimeSignalSource {
 
 function makeRuntimeHarness(options: {
   startErrors?: Array<Error | undefined>
+  startGates?: Array<Deferred<void> | undefined>
   signals?: RuntimeSignalSource
 } = {}) {
   const clients: FakeClient[] = []
@@ -341,7 +547,10 @@ function makeRuntimeHarness(options: {
       diagnose: async () => ({ status: "ok" as const }),
       createClient: (clientOptions: CodexProcessOptions) => {
         processOptions.push(clientOptions)
-        const client = new FakeClient(options.startErrors?.[clients.length])
+        const client = new FakeClient(
+          options.startErrors?.[clients.length],
+          options.startGates?.[clients.length]
+        )
         clients.push(client)
         return client
       },
@@ -355,6 +564,19 @@ function makeRuntimeHarness(options: {
       signals: options.signals ?? new FakeSignals(),
     },
   }
+}
+
+type Deferred<T> = {
+  promise: Promise<T>
+  resolve(value: T): void
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
 }
 
 function makeConfig(): ServerConfig {

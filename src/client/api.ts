@@ -89,8 +89,29 @@ export function createTaskMuxApi(
     if (body.length !== 0) throw invalidResponse(response.status)
   }
 
+  const healthRequest = async (): Promise<TaskMuxHealth> => {
+    const response = await fetcher("/api/health", undefined)
+    if (!response.ok && response.status !== 503) {
+      throw await responseError(response)
+    }
+    let body: unknown
+    try {
+      body = await response.json()
+    } catch {
+      throw invalidResponse(response.status)
+    }
+    const health = decodeHealth(body)
+    if (
+      health === null ||
+      (response.status === 503 && health.status !== "degraded")
+    ) {
+      throw invalidResponse(response.status)
+    }
+    return health
+  }
+
   return {
-    getHealth: () => jsonRequest("/api/health", decodeHealth),
+    getHealth: healthRequest,
     getWorkspace: () => jsonRequest("/api/workspace", decodeWorkspace),
     listConversations: () =>
       jsonRequest("/api/conversations", decodeConversationList),

@@ -96,6 +96,7 @@ const FILE_CHANGE_LABEL = "修改文件"
 
 export class CodexAppServerAdapter implements AgentAdapter {
   readonly #client: CodexJsonRpcClient
+  readonly #unsubscribeClient: () => void
   readonly #listeners = new Set<(event: AgentAdapterEvent) => void>()
   readonly #pendingApprovals = new Map<string, PendingApproval>()
   readonly #activeTurns = new Map<string, AdapterActiveTurn>()
@@ -109,7 +110,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   constructor(client: CodexJsonRpcClient) {
     this.#client = client
-    this.#client.subscribe((event) => this.#handleClientEvent(event))
+    this.#unsubscribeClient = this.#client.subscribe((event) =>
+      this.#handleClientEvent(event)
+    )
+  }
+
+  dispose(): void {
+    this.#unsubscribeClient()
   }
 
   async createSession(workspace: string): Promise<{ externalSessionId: string }> {

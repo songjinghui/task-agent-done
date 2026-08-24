@@ -11,6 +11,7 @@ export type AgentAdapterEvent = {
 }
 
 export interface AgentAdapter {
+  dispose?(): void
   createSession(workspace: string): Promise<{ externalSessionId: string }>
   readSession(externalSessionId: string): Promise<MessageTurn[]>
   resumeSession(externalSessionId: string): Promise<void>

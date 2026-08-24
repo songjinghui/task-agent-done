@@ -9,24 +9,15 @@ export class ReplaceableAgentAdapter implements AgentAdapter {
   #adapter: AgentAdapter = new UnavailableAgentAdapter("app_server_not_started")
   #unsubscribe: (() => void) | undefined
   #generation = 0
-  #eventObserver: ((event: AgentAdapterEvent) => void) | undefined
-
-  observeEvents(observer: (event: AgentAdapterEvent) => void): void {
-    this.#eventObserver = observer
-  }
 
   replace(adapter: AgentAdapter): void {
     this.#generation += 1
     const generation = this.#generation
     this.#unsubscribe?.()
+    this.#adapter.dispose?.()
     this.#adapter = adapter
     this.#unsubscribe = adapter.subscribe((event) => {
       if (generation !== this.#generation) return
-      try {
-        this.#eventObserver?.(event)
-      } catch {
-        // Observability must not interrupt provider event delivery.
-      }
       for (const listener of [...this.#listeners]) {
         try {
           listener(event)
@@ -39,6 +30,14 @@ export class ReplaceableAgentAdapter implements AgentAdapter {
 
   makeUnavailable(code: string): void {
     this.replace(new UnavailableAgentAdapter(code))
+  }
+
+  dispose(): void {
+    this.#generation += 1
+    this.#unsubscribe?.()
+    this.#unsubscribe = undefined
+    this.#adapter.dispose?.()
+    this.#adapter = new UnavailableAgentAdapter("app_server_stopped")
   }
 
   createSession(workspace: string): Promise<{ externalSessionId: string }> {

@@ -75,69 +75,35 @@ export async function startTaskMux(
   const database = (dependencies.openDatabase ?? openDatabase)(
     join(config.dataDir, "taskmux.sqlite")
   )
-  const repository = new ConversationRepository(database)
-  repository.interruptRunning()
+  let repository: ConversationRepository
   const eventHub = new EventHub()
   const adapterProxy = new ReplaceableAgentAdapter()
-
+  const signals = dependencies.signals ?? process
+  let app: FastifyInstance | undefined
+  let service: ConversationService | undefined
+  let closeFrontend: void | (() => Promise<void>)
   let health: AppHealth = { status: "ok" }
   let currentClient: RuntimeCodexClient | undefined
+  let startingClient: RuntimeCodexClient | undefined
   let currentExitUnsubscribe: (() => void) | undefined
+  let restartPromise: Promise<void> | undefined
   let restartBudget = 1
   let awaitingRecoveryCompletion = false
   let closing = false
+  let sigintRegistered = false
+  let sigtermRegistered = false
+  let databaseClosed = false
   let shutdownPromise: Promise<void> | undefined
-
-  adapterProxy.observeEvents((event) => {
+  const onSignal = () => {
+    void shutdown()
+  }
+  const unsubscribeRestartEvents = eventHub.subscribe((event) => {
     if (awaitingRecoveryCompletion && event.payload.type === "turn_completed") {
       restartBudget = 1
       awaitingRecoveryCompletion = false
       health = { status: "ok" }
     }
   })
-
-  const diagnose = dependencies.diagnose ?? diagnoseCodex
-  const diagnostic = await diagnose("codex")
-  if (diagnostic.status === "error") {
-    health = { status: "degraded", error: diagnostic.error }
-    adapterProxy.makeUnavailable(diagnostic.error.code)
-  } else {
-    try {
-      await startClient(false)
-    } catch (error) {
-      const mapped = handshakeDiagnostic(error)
-      health = { status: "degraded", error: mapped.error }
-      adapterProxy.makeUnavailable(mapped.error.code)
-    }
-  }
-
-  const service = new ConversationService({
-    repository,
-    adapter: adapterProxy,
-    eventSink: eventHub,
-    workspace: config.workspace,
-  })
-
-  const app = await buildApp({
-    config,
-    service,
-    eventHub,
-    health: () => health,
-    deferReady: true,
-  })
-  const configureFrontend =
-    dependencies.configureFrontend ?? configureTaskMuxFrontend
-  const closeFrontend = await configureFrontend(app, config.dev)
-  const listen =
-    dependencies.listen ?? ((instance, options) => instance.listen(options))
-  const address = await listen(app, { host: "127.0.0.1", port: config.port })
-  const signals = dependencies.signals ?? process
-
-  const onSignal = () => {
-    void shutdown()
-  }
-  signals.on("SIGINT", onSignal)
-  signals.on("SIGTERM", onSignal)
 
   async function startClient(recovery: boolean): Promise<void> {
     const createClient =
@@ -152,6 +118,7 @@ export async function startTaskMux(
       args: ["app-server"],
       cwd: config.workspace,
     })
+    startingClient = client
     const adapter = createAdapter(client)
     let starting = true
     let exitedDuringStart = false
@@ -171,17 +138,30 @@ export async function startTaskMux(
         return
       }
       restartBudget -= 1
-      void restartClient()
+      const pendingRestart = restartClient()
+      restartPromise = pendingRestart
+      void pendingRestart.finally(() => {
+        if (restartPromise === pendingRestart) restartPromise = undefined
+      })
     })
     try {
       await client.start(CLIENT_INFO)
       if (exitedDuringStart || closing) throw new Error("app_server_exited")
     } catch (error) {
       unsubscribe()
+      adapter.dispose?.()
       await client.stop().catch(() => {})
+      if (startingClient === client) startingClient = undefined
       throw error
     }
     starting = false
+    startingClient = undefined
+    if (closing) {
+      unsubscribe()
+      adapter.dispose?.()
+      await client.stop().catch(() => {})
+      throw new Error("app_server_stopped")
+    }
     currentClient = client
     currentExitUnsubscribe = unsubscribe
     adapterProxy.replace(adapter)
@@ -191,46 +171,116 @@ export async function startTaskMux(
   async function restartClient(): Promise<void> {
     try {
       await startClient(true)
-      health = { status: "ok" }
+      if (!closing) health = { status: "ok" }
     } catch {
-      health = repeatedExitHealth()
+      if (!closing) health = repeatedExitHealth()
     }
   }
 
   function shutdown(): Promise<void> {
     if (shutdownPromise) return shutdownPromise
     closing = true
-    signals.off("SIGINT", onSignal)
-    signals.off("SIGTERM", onSignal)
     shutdownPromise = (async () => {
-      await app.close()
-      try {
-        await service.handleClientDisconnect()
-      } catch {
-        // Continue shutting down even when interrupt delivery fails.
+      if (sigintRegistered) {
+        sigintRegistered = false
+        await bestEffort(() => signals.off("SIGINT", onSignal))
       }
-      currentExitUnsubscribe?.()
-      await currentClient?.stop()
-      await closeFrontend?.()
-      database.close()
+      if (sigtermRegistered) {
+        sigtermRegistered = false
+        await bestEffort(() => signals.off("SIGTERM", onSignal))
+      }
+      await bestEffort(() => currentExitUnsubscribe?.())
+      currentExitUnsubscribe = undefined
+      await bestEffort(() => unsubscribeRestartEvents())
+      const appClose = bestEffort(() => app?.close())
+      await bestEffort(() => service?.handleClientDisconnect())
+      await bestEffort(() => adapterProxy.dispose())
+      const clients = new Set(
+        [currentClient, startingClient].filter(
+          (client): client is RuntimeCodexClient => client !== undefined
+        )
+      )
+      currentClient = undefined
+      for (const client of clients) {
+        await bestEffort(() => client.stop())
+      }
+      await bestEffort(() => restartPromise)
+      startingClient = undefined
+      await appClose
+      await bestEffort(() => closeFrontend?.())
+      if (!databaseClosed) {
+        databaseClosed = true
+        await bestEffort(() => database.close())
+      }
     })()
     return shutdownPromise
   }
 
-  return {
-    app,
-    service,
-    repository,
-    eventHub,
-    address,
-    health: () => health,
-    shutdown,
+  try {
+    repository = new ConversationRepository(database)
+    repository.interruptRunning()
+    const diagnose = dependencies.diagnose ?? diagnoseCodex
+    const diagnostic = await diagnose("codex")
+    if (diagnostic.status === "error") {
+      health = { status: "degraded", error: diagnostic.error }
+      adapterProxy.makeUnavailable(diagnostic.error.code)
+    } else {
+      try {
+        await startClient(false)
+      } catch (error) {
+        const mapped = handshakeDiagnostic(error)
+        if (!mapped) throw error
+        health = { status: "degraded", error: mapped.error }
+        adapterProxy.makeUnavailable(mapped.error.code)
+      }
+    }
+
+    service = new ConversationService({
+      repository,
+      adapter: adapterProxy,
+      eventSink: eventHub,
+      workspace: config.workspace,
+    })
+    app = await buildApp({
+      config,
+      service,
+      eventHub,
+      health: () => health,
+      deferReady: true,
+    })
+    const configureFrontend =
+      dependencies.configureFrontend ?? configureTaskMuxFrontend
+    closeFrontend = await configureFrontend(app, config.dev)
+    const listen =
+      dependencies.listen ?? ((instance, options) => instance.listen(options))
+    const address = await listen(app, {
+      host: "127.0.0.1",
+      port: config.port,
+    })
+    if (closing) throw new Error("taskmux_stopped")
+    signals.on("SIGINT", onSignal)
+    sigintRegistered = true
+    signals.on("SIGTERM", onSignal)
+    sigtermRegistered = true
+
+    return {
+      app,
+      service,
+      repository,
+      eventHub,
+      address,
+      health: () => health,
+      shutdown,
+    }
+  } catch (error) {
+    await shutdown()
+    throw error
   }
 }
 
 function handshakeDiagnostic(
   error: unknown
-): Extract<CodexDiagnostic, { status: "error" }> {
+): Extract<CodexDiagnostic, { status: "error" }> | null {
   const message = error instanceof Error ? error.message.toLowerCase() : ""
   if (
     message.includes("unauthorized") ||
@@ -243,10 +293,17 @@ function handshakeDiagnostic(
       "Codex CLI is not authenticated. Run codex login and try again."
     ) as Extract<CodexDiagnostic, { status: "error" }>
   }
-  return diagnosticError(
-    "codex_version_unsupported",
-    "Codex app-server could not be initialized. Update Codex CLI and try again."
-  ) as Extract<CodexDiagnostic, { status: "error" }>
+  return null
+}
+
+async function bestEffort(
+  operation: () => void | undefined | Promise<void>
+): Promise<void> {
+  try {
+    await operation()
+  } catch {
+    // Cleanup continues so later owned resources are still released.
+  }
 }
 
 function repeatedExitHealth(): AppHealth {
@@ -296,8 +353,19 @@ export async function configureTaskMuxFrontend(
           server: { middlewareMode: true },
           appType: "spa",
         })
-    await app.register(middie)
-    app.use(vite.middlewares)
+    try {
+      await app.register(middie)
+      app.use((request, response, next) => {
+        if (isApiUrl(request.url ?? "")) {
+          next()
+          return
+        }
+        vite.middlewares(request, response, next)
+      })
+    } catch (error) {
+      await vite.close().catch(() => {})
+      throw error
+    }
     return async () => vite.close()
   }
 
