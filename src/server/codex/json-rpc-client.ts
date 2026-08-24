@@ -11,6 +11,7 @@ import type {
 export type { CodexClientInfo, CodexJsonRpcClientEvent, CodexProcessOptions, JsonRpcId }
 
 export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000
+export const DEFAULT_STOP_TIMEOUT_MS = 1_000
 
 type PendingRequest = {
   reject: (reason: Error) => void
@@ -37,7 +38,10 @@ export class CodexJsonRpcClient {
     return this.#stderr
   }
 
-  async start(clientInfo: CodexClientInfo): Promise<void> {
+  async start(
+    clientInfo: CodexClientInfo,
+    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
+  ): Promise<void> {
     if (this.#state === "started") {
       return
     }
@@ -55,7 +59,7 @@ export class CodexJsonRpcClient {
     try {
       const initializeResult = await this.#request<unknown>("initialize", {
         clientInfo,
-      })
+      }, timeoutMs)
       if (!isRecord(initializeResult)) {
         throw new Error("invalid_initialize_response")
       }
@@ -64,7 +68,7 @@ export class CodexJsonRpcClient {
     } catch (error) {
       this.#state = "stopped"
       this.#rejectPending(error instanceof Error ? error : new Error(String(error)))
-      this.#child.kill()
+      this.#child.kill("SIGKILL")
       throw error
     }
   }
@@ -117,9 +121,12 @@ export class CodexJsonRpcClient {
     return () => this.#listeners.delete(listener)
   }
 
-  async stop(): Promise<void> {
+  async stop(timeoutMs = DEFAULT_STOP_TIMEOUT_MS): Promise<void> {
     if (this.#stopPromise) {
       return this.#stopPromise
+    }
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+      throw new Error("invalid_stop_timeout")
     }
     if (!this.#child || this.#state === "stopped") {
       this.#state = "stopped"
@@ -135,8 +142,41 @@ export class CodexJsonRpcClient {
         resolve()
         return
       }
-      child.once("exit", () => resolve())
-      child.kill()
+      let timer: ReturnType<typeof setTimeout> | undefined
+      let settled = false
+      const finish = () => {
+        if (settled) return
+        settled = true
+        if (timer) clearTimeout(timer)
+        child.off("exit", finish)
+        this.#state = "stopped"
+        resolve()
+      }
+      child.once("exit", finish)
+      if (timeoutMs === 0) {
+        try {
+          child.kill("SIGKILL")
+        } finally {
+          finish()
+        }
+        return
+      }
+      timer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL")
+        } finally {
+          finish()
+        }
+      }, timeoutMs)
+      try {
+        child.kill("SIGTERM")
+      } catch {
+        try {
+          child.kill("SIGKILL")
+        } finally {
+          finish()
+        }
+      }
     })
     return this.#stopPromise
   }

@@ -135,7 +135,7 @@ test("degrades after a second consecutive crash and shows a stable manual action
   )
 })
 
-test("restores native history after restarting the service with the same database", async ({
+test("resumes the native session after restarting the service with the same database", async ({
   page,
   taskmux,
 }) => {
@@ -148,4 +148,21 @@ test("restores native history after restarting the service with the same databas
   await page.goto(taskmux.address)
   await expect(page.getByLabel("用户消息")).toContainText("hello before service restart")
   await expect(page.getByLabel("Assistant 消息")).toContainText("hello world")
+
+  await send(page, "continue after service restart")
+  await expect(page.getByLabel("用户消息").last()).toContainText(
+    "continue after service restart"
+  )
+  await expect(page.getByLabel("Assistant 消息").last()).toContainText("ok")
+
+  await page.reload()
+  await expect(page.getByLabel("用户消息")).toHaveCount(2)
+  await expect(page.getByLabel("用户消息").first()).toContainText(
+    "hello before service restart"
+  )
+  await expect(page.getByLabel("用户消息").last()).toContainText(
+    "continue after service restart"
+  )
+  await expect(page.getByLabel("Assistant 消息").first()).toContainText("hello world")
+  await expect(page.getByLabel("Assistant 消息").last()).toContainText("ok")
 })

@@ -85,6 +85,23 @@ describe("CodexJsonRpcClient", () => {
     await starting
   })
 
+  it("applies an explicit timeout to the initialize handshake", async () => {
+    const workspace = createWorkspace()
+    const client = new CodexJsonRpcClient({
+      command: process.execPath,
+      args: [fixturePath, "--ignore-initialize"],
+      cwd: workspace,
+    })
+    clients.push(client)
+
+    await expect(
+      client.start(
+        { name: "taskmux", title: "TaskMux", version: "0.1.0" },
+        25
+      )
+    ).rejects.toThrow("app_server_request_timeout")
+  })
+
   it("delivers item notifications from an in-memory hello turn", async () => {
     const { client, workspace } = await startClient()
     const thread = await client.request<{ thread: { id: string } }>("thread/start", {
@@ -223,5 +240,15 @@ describe("CodexJsonRpcClient", () => {
     await client.stop()
 
     await rejectedRequest
+  })
+
+  it("escalates from TERM to KILL and resolves when the child ignores TERM", async () => {
+    const { client } = await startClient()
+    await client.request("test/ignore-term")
+    const exit = nextEvent(client, (event) => event.type === "exit")
+
+    await client.stop(25)
+
+    await expect(exit).resolves.toMatchObject({ type: "exit", signal: "SIGKILL" })
   })
 })

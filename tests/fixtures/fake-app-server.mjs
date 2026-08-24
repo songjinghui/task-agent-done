@@ -210,6 +210,7 @@ function driveTurn(turn) {
 
 function handleRequest(message) {
   if (message.method === "initialize") {
+    if (process.argv.includes("--ignore-initialize")) return
     sendSplit({
       jsonrpc: "2.0",
       id: message.id,
@@ -268,6 +269,11 @@ function handleRequest(message) {
     return
   }
   if (message.method === "test/timeout") return
+  if (message.method === "test/ignore-term") {
+    process.on("SIGTERM", () => {})
+    respond(message.id, { ok: true })
+    return
+  }
   if (message.method === "test/malformed") {
     process.stdout.write("{not valid JSON}\n")
     respond(message.id, { ok: true })
