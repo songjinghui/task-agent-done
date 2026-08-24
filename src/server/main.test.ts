@@ -79,6 +79,25 @@ describe("startTaskMux", () => {
     await running.shutdown()
   })
 
+  it.each(["app_server_request_timeout", "invalid_initialize_response"])(
+    "keeps HTTP available for unsupported initialize failure %s",
+    async (message) => {
+      const harness = makeRuntimeHarness({ startErrors: [new Error(message)] })
+      const running = await startTaskMux(makeConfig(), harness.dependencies)
+
+      expect(running.health()).toEqual({
+        status: "degraded",
+        error: {
+          code: "codex_version_unsupported",
+          message: "This Codex CLI version does not support app-server.",
+        },
+      })
+      const response = await running.app.inject({ method: "GET", url: "/api/health" })
+      expect(response.statusCode).toBe(503)
+      await running.shutdown()
+    }
+  )
+
   it("restarts once, keeps the HTTP service, and releases an active turn first", async () => {
     const harness = makeRuntimeHarness()
     const running = await startTaskMux(makeConfig(), harness.dependencies)

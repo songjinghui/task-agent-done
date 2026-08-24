@@ -283,6 +283,15 @@ function handshakeDiagnostic(
 ): Extract<CodexDiagnostic, { status: "error" }> | null {
   const message = error instanceof Error ? error.message.toLowerCase() : ""
   if (
+    message === "app_server_request_timeout" ||
+    message === "invalid_initialize_response"
+  ) {
+    return diagnosticError(
+      "codex_version_unsupported",
+      "This Codex CLI version does not support app-server."
+    ) as Extract<CodexDiagnostic, { status: "error" }>
+  }
+  if (
     message.includes("unauthorized") ||
     message.includes("authentication") ||
     message.includes("not authenticated") ||
