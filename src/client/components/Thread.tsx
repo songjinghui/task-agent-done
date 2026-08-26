@@ -69,6 +69,13 @@ export function Thread({
   }
 
   const hasMessages = turns.length > 0 || liveText.length > 0
+  const terminalError =
+    liveError ??
+    (conversation.status === "failed"
+      ? "上一轮执行失败。"
+      : conversation.status === "interrupted"
+        ? "上一轮已中断。"
+        : null)
 
   return (
     <main className="thread" aria-labelledby="thread-title">
@@ -115,9 +122,9 @@ export function Thread({
         externalError={approvalError}
         onDecision={onApproval}
       />
-      {liveError ? (
+      {terminalError ? (
         <p className="turn-error" role="alert">
-          {liveError}
+          {terminalError}
         </p>
       ) : null}
       <Composer

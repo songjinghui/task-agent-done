@@ -161,6 +161,82 @@ describe("App", () => {
     ])
   })
 
+  it.each([
+    ["failed", "上一轮执行失败。"],
+    ["interrupted", "上一轮已中断。"],
+  ] as const)(
+    "shows a terminal notice for a %s conversation without a live error",
+    async (status, notice) => {
+      render(
+        <App
+          api={fakeApi({
+            listConversations: async () => [{ ...first, status }],
+            getConversation: async () =>
+              detail(first.id, [turn("user-only", "user", "hi", status)]),
+          })}
+        />
+      )
+
+      expect(await screen.findByRole("alert")).toHaveTextContent(notice)
+    }
+  )
+
+  it("shows a live provider error ahead of the fixed terminal notice", async () => {
+    installEventSource()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [{ ...first, status: "failed" }],
+          getConversation: async () => detail(first.id, []),
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+    const source = FakeEventSource.instances[0]!
+
+    act(() => {
+      source.open()
+      source.event(1, first.id, {
+        type: "error",
+        code: "usageLimitExceeded",
+        message: "You've hit your usage limit. Try again later.",
+        terminal: true,
+        scope: "turn",
+        turnId: "turn-failed",
+      })
+    })
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "You've hit your usage limit. Try again later."
+    )
+    expect(screen.queryByText("上一轮执行失败。")).not.toBeInTheDocument()
+  })
+
+  it("removes a fixed terminal notice when a new turn starts and completes", async () => {
+    installEventSource()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [{ ...first, status: "failed" }],
+          getConversation: async () => detail(first.id, []),
+        })}
+      />
+    )
+    expect(await screen.findByRole("alert")).toHaveTextContent("上一轮执行失败。")
+    const source = FakeEventSource.instances[0]!
+
+    act(() => {
+      source.open()
+      source.event(1, first.id, { type: "turn_started", turnId: "turn-new" })
+    })
+    expect(screen.queryByText("上一轮执行失败。")).not.toBeInTheDocument()
+
+    act(() => {
+      source.event(2, first.id, { type: "turn_completed", turnId: "turn-new" })
+    })
+    expect(screen.queryByText("上一轮执行失败。")).not.toBeInTheDocument()
+  })
+
   it("renders only completed history and keeps message content as literal text", async () => {
     const api = fakeApi({
       listConversations: async () => [first],
