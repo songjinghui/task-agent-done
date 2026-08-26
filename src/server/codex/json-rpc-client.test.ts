@@ -190,10 +190,70 @@ describe("CodexJsonRpcClient", () => {
 
   it("rejects a request that exceeds its timeout", async () => {
     const { client } = await startClient()
+    const events: CodexJsonRpcClientEvent[] = []
+    client.subscribe((event) => events.push(event))
 
-    await expect(client.request("test/timeout", undefined, 25)).rejects.toThrow(
-      "app_server_request_timeout"
-    )
+    await expect(client.request("test/timeout", undefined, 25)).rejects.toMatchObject({
+      name: "CodexRequestError",
+      code: "app_server_request_timeout",
+      method: "test/timeout",
+      recoverable: true,
+    })
+    expect(events).toContainEqual({
+      type: "request_failure",
+      method: "test/timeout",
+      code: "app_server_request_timeout",
+      message: "Codex App Server request timed out.",
+      recoverable: true,
+    })
+  })
+
+  it("classifies a Codex internal child-process timeout without exposing error data", async () => {
+    const { client } = await startClient()
+    const events: CodexJsonRpcClientEvent[] = []
+    client.subscribe((event) => events.push(event))
+
+    await expect(
+      client.request("test/recoverable-error", { prompt: "private prompt" })
+    ).rejects.toMatchObject({
+      name: "CodexRequestError",
+      code: "codex_request_failed",
+      method: "test/recoverable-error",
+      message: "timeout waiting for child process to exit",
+      recoverable: true,
+    })
+    expect(events).toContainEqual({
+      type: "request_failure",
+      method: "test/recoverable-error",
+      code: "codex_request_failed",
+      message: "timeout waiting for child process to exit",
+      recoverable: true,
+    })
+    expect(JSON.stringify(events)).not.toContain("private prompt")
+    expect(JSON.stringify(events)).not.toContain("private/secret")
+    expect(JSON.stringify(events)).not.toContain("rawRequest")
+  })
+
+  it("keeps business request failures non-recoverable while preserving a safe message", async () => {
+    const { client } = await startClient()
+    const events: CodexJsonRpcClientEvent[] = []
+    client.subscribe((event) => events.push(event))
+
+    await expect(client.request("test/business-error")).rejects.toMatchObject({
+      name: "CodexRequestError",
+      code: "codex_request_failed",
+      method: "test/business-error",
+      message: "thread_not_found",
+      recoverable: false,
+    })
+    expect(events).toContainEqual({
+      type: "request_failure",
+      method: "test/business-error",
+      code: "codex_request_failed",
+      message: "thread_not_found",
+      recoverable: false,
+    })
+    expect(JSON.stringify(events)).not.toContain("private-thread-id")
   })
 
   it("delivers command approvals and sends an explicit response", async () => {

@@ -14,12 +14,35 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000
 export const DEFAULT_STOP_TIMEOUT_MS = 1_000
 
 type PendingRequest = {
+  method: string
   reject: (reason: Error) => void
   resolve: (value: unknown) => void
   timeout: ReturnType<typeof setTimeout>
 }
 
 type JsonRpcMessage = Record<string, unknown>
+
+export class CodexRequestError extends Error {
+  readonly code: string
+  readonly method: string
+  readonly publicMessage: string
+  readonly recoverable: boolean
+
+  constructor(options: {
+    code: string
+    message: string
+    method: string
+    publicMessage?: string
+    recoverable: boolean
+  }) {
+    super(options.message)
+    this.name = "CodexRequestError"
+    this.code = options.code
+    this.method = options.method
+    this.publicMessage = options.publicMessage ?? options.message
+    this.recoverable = options.recoverable
+  }
+}
 
 export class CodexJsonRpcClient {
   readonly #listeners = new Set<CodexJsonRpcClientListener>()
@@ -92,11 +115,21 @@ export class CodexJsonRpcClient {
     const id = this.#nextRequestId++
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
-        if (this.#pendingRequests.delete(id)) {
-          reject(new Error("app_server_request_timeout"))
+        const pending = this.#pendingRequests.get(id)
+        if (pending && this.#pendingRequests.delete(id)) {
+          const error = new CodexRequestError({
+            code: "app_server_request_timeout",
+            message: "app_server_request_timeout",
+            method,
+            publicMessage: "Codex App Server request timed out.",
+            recoverable: true,
+          })
+          this.#emitRequestFailure(error)
+          reject(error)
         }
       }, timeoutMs)
       this.#pendingRequests.set(id, {
+        method,
         resolve: (value) => resolve(value as T),
         reject,
         timeout,
@@ -265,11 +298,20 @@ export class CodexJsonRpcClient {
     this.#pendingRequests.delete(message.id)
     clearTimeout(pending.timeout)
     if (Object.hasOwn(message, "error")) {
-      pending.reject(toResponseError(message.error))
+      const error = toResponseError(pending.method, message.error)
+      this.#emitRequestFailure(error)
+      pending.reject(error)
       return
     }
     if (!Object.hasOwn(message, "result")) {
-      pending.reject(new Error("invalid_json_rpc_response"))
+      const error = new CodexRequestError({
+        code: "invalid_json_rpc_response",
+        message: "Codex App Server returned an invalid response.",
+        method: pending.method,
+        recoverable: true,
+      })
+      this.#emitRequestFailure(error)
+      pending.reject(error)
       return
     }
     pending.resolve(message.result)
@@ -288,6 +330,16 @@ export class CodexJsonRpcClient {
       pending.reject(error)
     }
     this.#pendingRequests.clear()
+  }
+
+  #emitRequestFailure(error: CodexRequestError): void {
+    this.#emit({
+      type: "request_failure",
+      method: error.method,
+      code: error.code,
+      message: error.publicMessage,
+      recoverable: error.recoverable,
+    })
   }
 
   #emit(event: CodexJsonRpcClientEvent): void {
@@ -309,9 +361,27 @@ function isJsonRpcId(value: unknown): value is JsonRpcId {
   return typeof value === "string" || typeof value === "number"
 }
 
-function toResponseError(value: unknown): Error {
-  if (isRecord(value) && typeof value.message === "string") {
-    return new Error(value.message)
+function toResponseError(method: string, value: unknown): CodexRequestError {
+  const upstreamCode = isRecord(value) ? value.code : undefined
+  const message = sanitizedErrorMessage(value)
+  return new CodexRequestError({
+    code: "codex_request_failed",
+    message,
+    method,
+    recoverable:
+      upstreamCode === -32603 ||
+      message.toLowerCase().includes("timeout waiting for child process to exit"),
+  })
+}
+
+function sanitizedErrorMessage(value: unknown): string {
+  if (!isRecord(value) || typeof value.message !== "string") {
+    return "Codex App Server request failed."
   }
-  return new Error("app_server_request_failed")
+  const sanitized = value.message
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 500)
+  return sanitized || "Codex App Server request failed."
 }

@@ -332,6 +332,33 @@ function handleRequest(message) {
     respond(message.id, { ok: true })
     return
   }
+  if (message.method === "test/recoverable-error") {
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      error: {
+        code: -32603,
+        message: "timeout waiting for child process to exit",
+        data: {
+          path: "/private/secret/workspace",
+          rawRequest: message.params,
+        },
+      },
+    })
+    return
+  }
+  if (message.method === "test/business-error") {
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      error: {
+        code: -32002,
+        message: "thread_not_found",
+        data: { threadId: "private-thread-id" },
+      },
+    })
+    return
+  }
   reject(message.id, "method_not_found")
 }
 

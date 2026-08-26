@@ -26,6 +26,13 @@ export type CodexJsonRpcClientEvent =
       signal: NodeJS.Signals | null
       stderr: string
     }
+  | {
+      type: "request_failure"
+      method: string
+      code: string
+      message: string
+      recoverable: boolean
+    }
   | { type: "protocol_error"; message: string; raw?: string }
 
 export type CodexJsonRpcClientListener = (event: CodexJsonRpcClientEvent) => void
