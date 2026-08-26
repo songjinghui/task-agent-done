@@ -73,7 +73,10 @@ function promptFrom(params) {
   return ""
 }
 
-function completeTurn(turn, { status = "completed", text = "ok", tools = [] } = {}) {
+function completeTurn(
+  turn,
+  { status = "completed", text = "ok", tools = [], error } = {}
+) {
   if (turn.completed) return
   turn.completed = true
   const thread = state.threads[turn.threadId]
@@ -81,6 +84,7 @@ function completeTurn(turn, { status = "completed", text = "ok", tools = [] } = 
     thread.turns.push({
       id: turn.id,
       status,
+      ...(error ? { error } : {}),
       items: [
         {
           id: `user_${turn.id}`,
@@ -97,7 +101,7 @@ function completeTurn(turn, { status = "completed", text = "ok", tools = [] } = 
   }
   notification("turn/completed", {
     threadId: turn.threadId,
-    turn: { id: turn.id, status },
+    turn: { id: turn.id, status, ...(error ? { error } : {}) },
   })
 }
 
@@ -126,6 +130,18 @@ function driveTurn(turn) {
     process.exit(17)
   }
   if (turn.prompt.includes("[crash]")) process.exit(17)
+  if (turn.prompt.includes("[usage-limit]")) {
+    completeTurn(turn, {
+      status: "failed",
+      text: "",
+      error: {
+        codexErrorInfo: "usageLimitExceeded",
+        message: "You've hit your usage limit. Try again after the reset time.",
+        additionalDetails: "private billing detail",
+      },
+    })
+    return
+  }
   if (turn.prompt.includes("[generic-tool]")) {
     const item = {
       id: `generic_${turn.id}`,

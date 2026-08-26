@@ -27,6 +27,24 @@ test("creates a conversation, streams text and restores the resumed history afte
   await expect(page.getByLabel("Assistant 消息")).toContainText("hello world")
 })
 
+test("shows a Codex usage error and a stable failed notice after refresh", async ({
+  page,
+  taskmux,
+}) => {
+  await page.goto(taskmux.address)
+  await createConversation(page)
+  await send(page, "[usage-limit]")
+
+  await expect(page.getByRole("alert")).toContainText(
+    "You've hit your usage limit. Try again after the reset time."
+  )
+  await expect(page.getByRole("alert")).not.toContainText("private billing detail")
+
+  await page.reload()
+  await expect(page.getByRole("alert")).toHaveText("上一轮执行失败。")
+  await expect(page.getByText("You've hit your usage limit", { exact: false })).toHaveCount(0)
+})
+
 test("keeps two conversations isolated while switching between them", async ({
   page,
   taskmux,
