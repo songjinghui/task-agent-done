@@ -19,10 +19,11 @@ import {
   type RuntimeCodexClient,
   type RuntimeSignalSource,
 } from "./main.js"
-import type {
-  CodexClientInfo,
-  CodexJsonRpcClientEvent,
-  CodexProcessOptions,
+import {
+  CodexRequestError,
+  type CodexClientInfo,
+  type CodexJsonRpcClientEvent,
+  type CodexProcessOptions,
 } from "./codex/json-rpc-client.js"
 
 const directories: string[] = []
@@ -113,6 +114,91 @@ describe("startTaskMux", () => {
     await expect(
       running.service.sendText(conversation.id, "after restart")
     ).resolves.toBeUndefined()
+    await running.shutdown()
+  })
+
+  it("replaces a client after recoverable turn/start failure without replaying the prompt", async () => {
+    const requestError = recoverableTurnStartError()
+    const harness = makeRuntimeHarness({ sendErrors: [requestError] })
+    const running = await startTaskMux(makeConfig(), harness.dependencies)
+    const conversation = await running.service.create()
+
+    await expect(running.service.sendText(conversation.id, "first attempt")).rejects.toBe(
+      requestError
+    )
+    expect(running.repository.getById(conversation.id)?.status).toBe("failed")
+    await expect.poll(() => harness.clients.length).toBe(2)
+
+    expect(harness.adapters[0]!.sendTextCalls).toEqual(["first attempt"])
+    expect(harness.adapters[1]!.sendTextCalls).toEqual([])
+    await expect(
+      running.service.sendText(conversation.id, "explicit retry")
+    ).resolves.toBeUndefined()
+    expect(harness.adapters[1]!.sendTextCalls).toEqual(["explicit retry"])
+    await running.shutdown()
+  })
+
+  it("does not restart for a non-recoverable Codex business request failure", async () => {
+    const requestError = new CodexRequestError({
+      code: "codex_request_failed",
+      message: "thread_not_found",
+      method: "turn/start",
+      recoverable: false,
+    })
+    const harness = makeRuntimeHarness({ sendErrors: [requestError] })
+    const running = await startTaskMux(makeConfig(), harness.dependencies)
+    const conversation = await running.service.create()
+
+    await expect(running.service.sendText(conversation.id, "first attempt")).rejects.toBe(
+      requestError
+    )
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(harness.clients).toHaveLength(1)
+    await expect(
+      running.service.sendText(conversation.id, "explicit retry")
+    ).resolves.toBeUndefined()
+    expect(harness.adapters[0]!.sendTextCalls).toEqual([
+      "first attempt",
+      "explicit retry",
+    ])
+    await running.shutdown()
+  })
+
+  it("degrades after consecutive recoverable request failures without a restart loop", async () => {
+    const harness = makeRuntimeHarness({
+      sendErrors: [recoverableTurnStartError(), recoverableTurnStartError()],
+    })
+    const running = await startTaskMux(makeConfig(), harness.dependencies)
+    const conversation = await running.service.create()
+
+    await expect(running.service.sendText(conversation.id, "first")).rejects.toThrow()
+    await expect.poll(() => harness.clients.length).toBe(2)
+    await expect(running.service.sendText(conversation.id, "second")).rejects.toThrow()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(harness.clients).toHaveLength(2)
+    expect(running.health()).toEqual({
+      status: "degraded",
+      error: {
+        code: "codex_request_failed",
+        message: "Agent service failed repeatedly. Restart TaskMux to try again.",
+      },
+    })
+    await running.shutdown()
+  })
+
+  it("deduplicates a recoverable request failure followed by the retired client exit", async () => {
+    const harness = makeRuntimeHarness({ sendErrors: [recoverableTurnStartError()] })
+    const running = await startTaskMux(makeConfig(), harness.dependencies)
+    const conversation = await running.service.create()
+
+    await expect(running.service.sendText(conversation.id, "first")).rejects.toThrow()
+    harness.clients[0]!.emitExit()
+    await expect.poll(() => harness.clients.length).toBe(2)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    expect(harness.clients).toHaveLength(2)
+    expect(harness.clients[0]!.stopCalls).toBeGreaterThanOrEqual(1)
     await running.shutdown()
   })
 
@@ -461,6 +547,18 @@ class FakeClient implements RuntimeCodexClient {
       listener({ type: "exit", code: 17, signal: null, stderr: "secret stderr" })
     }
   }
+
+  emitRequestFailure(error: CodexRequestError): void {
+    for (const listener of [...this.listeners]) {
+      listener({
+        type: "request_failure",
+        method: error.method,
+        code: error.code,
+        message: error.publicMessage,
+        recoverable: error.recoverable,
+      })
+    }
+  }
 }
 
 class FakeAdapter implements AgentAdapter {
@@ -470,8 +568,11 @@ class FakeAdapter implements AgentAdapter {
   readonly cancelCalls: string[] = []
   nextTurn = 1
   readonly unsubscribeClient: () => void
+  readonly sendTextCalls: string[] = []
+  #sendError: CodexRequestError | undefined
 
-  constructor(client: FakeClient) {
+  constructor(readonly client: FakeClient, sendError?: CodexRequestError) {
+    this.#sendError = sendError
     this.unsubscribeClient = client.subscribe((event) => {
       if (event.type !== "exit") return
       for (const externalSessionId of [...this.active]) {
@@ -498,7 +599,14 @@ class FakeAdapter implements AgentAdapter {
     return []
   }
   async resumeSession(): Promise<void> {}
-  async sendText(externalSessionId: string, _text: string, operationId: string) {
+  async sendText(externalSessionId: string, text: string, operationId: string) {
+    this.sendTextCalls.push(text)
+    if (this.#sendError) {
+      const error = this.#sendError
+      this.#sendError = undefined
+      this.client.emitRequestFailure(error)
+      throw error
+    }
     this.operations.set(externalSessionId, operationId)
     this.active.add(externalSessionId)
     return { turnId: `turn-${this.nextTurn++}` }
@@ -546,6 +654,7 @@ class FakeSignals implements RuntimeSignalSource {
 function makeRuntimeHarness(options: {
   startErrors?: Array<Error | undefined>
   startGates?: Array<Deferred<void> | undefined>
+  sendErrors?: Array<CodexRequestError | undefined>
   signals?: RuntimeSignalSource
 } = {}) {
   const clients: FakeClient[] = []
@@ -574,7 +683,10 @@ function makeRuntimeHarness(options: {
         return client
       },
       createAdapter: (client: RuntimeCodexClient) => {
-        const adapter = new FakeAdapter(client as FakeClient)
+        const adapter = new FakeAdapter(
+          client as FakeClient,
+          options.sendErrors?.[adapters.length]
+        )
         adapters.push(adapter)
         return adapter
       },
@@ -583,6 +695,15 @@ function makeRuntimeHarness(options: {
       signals: options.signals ?? new FakeSignals(),
     },
   }
+}
+
+function recoverableTurnStartError(): CodexRequestError {
+  return new CodexRequestError({
+    code: "codex_request_failed",
+    message: "timeout waiting for child process to exit",
+    method: "turn/start",
+    recoverable: true,
+  })
 }
 
 type Deferred<T> = {

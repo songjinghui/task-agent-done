@@ -123,27 +123,55 @@ export async function startTaskMux(
     let starting = true
     let exitedDuringStart = false
     const unsubscribe = client.subscribe((event) => {
-      if (event.type !== "exit" || closing) return
+      if (closing) return
+      if (event.type === "request_failure") {
+        if (
+          starting ||
+          event.method !== "turn/start" ||
+          !event.recoverable
+        ) {
+          return
+        }
+        retireCurrentClient("request", true)
+        return
+      }
+      if (event.type !== "exit") return
       if (starting) {
         exitedDuringStart = true
         return
       }
-      if (client !== currentClient) return
+      retireCurrentClient("exit", false)
+    })
+
+    function retireCurrentClient(
+      failure: "exit" | "request",
+      stopClient: boolean
+    ): void {
+      if (client !== currentClient || closing) return
       unsubscribe()
       currentClient = undefined
       currentExitUnsubscribe = undefined
       adapterProxy.makeUnavailable("app_server_not_started")
       if (restartBudget <= 0) {
-        health = repeatedExitHealth()
+        health =
+          failure === "exit" ? repeatedExitHealth() : repeatedRequestFailureHealth()
+        if (stopClient) {
+          trackRestart(client.stop().catch(() => {}))
+        }
         return
       }
       restartBudget -= 1
-      const pendingRestart = restartClient()
-      restartPromise = pendingRestart
-      void pendingRestart.finally(() => {
-        if (restartPromise === pendingRestart) restartPromise = undefined
-      })
-    })
+      if (failure === "request") {
+        health = {
+          status: "degraded",
+          error: {
+            code: "codex_request_failed",
+            message: "Codex App Server is restarting after a request failure.",
+          },
+        }
+      }
+      trackRestart(restartClient(failure, stopClient ? client : undefined))
+    }
     try {
       await client.start(CLIENT_INFO)
       if (exitedDuringStart || closing) throw new Error("app_server_exited")
@@ -168,12 +196,27 @@ export async function startTaskMux(
     if (recovery) awaitingRecoveryCompletion = true
   }
 
-  async function restartClient(): Promise<void> {
+  function trackRestart(pendingRestart: Promise<void>): void {
+    restartPromise = pendingRestart
+    void pendingRestart.finally(() => {
+      if (restartPromise === pendingRestart) restartPromise = undefined
+    })
+  }
+
+  async function restartClient(
+    failure: "exit" | "request",
+    retiredClient?: RuntimeCodexClient
+  ): Promise<void> {
     try {
+      await retiredClient?.stop().catch(() => {})
+      if (closing) return
       await startClient(true)
       if (!closing) health = { status: "ok" }
     } catch {
-      if (!closing) health = repeatedExitHealth()
+      if (!closing) {
+        health =
+          failure === "exit" ? repeatedExitHealth() : repeatedRequestFailureHealth()
+      }
     }
   }
 
@@ -321,6 +364,16 @@ function repeatedExitHealth(): AppHealth {
     error: {
       code: "app_server_exited",
       message: "Agent service exited repeatedly. Restart TaskMux to try again.",
+    },
+  }
+}
+
+function repeatedRequestFailureHealth(): AppHealth {
+  return {
+    status: "degraded",
+    error: {
+      code: "codex_request_failed",
+      message: "Agent service failed repeatedly. Restart TaskMux to try again.",
     },
   }
 }
