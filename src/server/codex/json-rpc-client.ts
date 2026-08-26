@@ -239,21 +239,24 @@ export class CodexJsonRpcClient {
       this.#state = "stopped"
       this.#failPendingRequests(
         "app_server_exited",
-        "Codex App Server exited unexpectedly."
+        "Codex App Server exited unexpectedly.",
+        false
       )
     })
     child.once("exit", (code, signal) => {
       this.#state = "stopped"
       this.#failPendingRequests(
         "app_server_exited",
-        "Codex App Server exited unexpectedly."
+        "Codex App Server exited unexpectedly.",
+        false
       )
     })
     child.once("close", (code, signal) => {
       this.#state = "stopped"
       this.#failPendingRequests(
         "app_server_exited",
-        "Codex App Server exited unexpectedly."
+        "Codex App Server exited unexpectedly.",
+        false
       )
       this.#emit({ type: "exit", code, signal, stderr: this.#stderr })
     })
@@ -356,7 +359,11 @@ export class CodexJsonRpcClient {
     this.#pendingRequests.clear()
   }
 
-  #failPendingRequests(code: string, publicMessage: string): void {
+  #failPendingRequests(
+    code: string,
+    publicMessage: string,
+    emitFailure = true
+  ): void {
     const pendingRequests = [...this.#pendingRequests.values()]
     this.#pendingRequests.clear()
     for (const pending of pendingRequests) {
@@ -368,7 +375,7 @@ export class CodexJsonRpcClient {
         publicMessage,
         recoverable: true,
       })
-      this.#emitRequestFailure(error)
+      if (emitFailure) this.#emitRequestFailure(error)
       pending.reject(error)
     }
   }

@@ -62,6 +62,7 @@ const DIAGNOSTIC_ACTIONS: Readonly<Record<string, string>> = {
   codex_not_found: "安装 Codex CLI",
   codex_version_unsupported: "更新 Codex CLI",
   codex_not_authenticated: "运行 codex login",
+  codex_request_failed: "重启 TaskMux",
   app_server_exited: "重启 TaskMux",
 }
 
