@@ -28,6 +28,24 @@ Original operator requirement: a failed previous send must not make later sends 
 | Next explicit send works after replacement | Pass | Playwright observes failed request, two ready clients, then `hello world` from the explicit retry |
 | Repeated failure does not loop | Pass | Second recoverable failure degrades health and starts no third client |
 
+## Fresh-Context Disposition
+
+An independent scan of `bc88786` found two Important issues before formal
+review. Both were reproduced with failing tests and fixed:
+
+| Finding | Disposition | Evidence |
+|---|---|---|
+| Environment values, file URIs, UNC paths, and stack lines could cross `publicMessage` | Fixed in `803c275` | JSON-RPC tests cover the response path and the `CodexRequestError` constructor boundary |
+| A live child whose stdin stopped accepting requests could reject with an untyped error and remain installed | Fixed in `803c275` | Real child-process fixture closes stdin while staying alive; `turn/start` now rejects with a recoverable typed event |
+
+The same audit tightened unknown JSON-RPC internal errors to non-recoverable by
+default. Only the observed child-process timeout signature is classified as a
+recoverable response failure; transport timeouts, invalid responses, stopped
+stdin, and exits retain their explicit transport classifications. A full E2E
+rerun then exposed an exit/request ordering regression; `e7bd3da` preserves exit
+supervision and adds the stable manual restart action for repeated request
+failures.
+
 ## Stateful Invariants
 
 - INV-1 through INV-7 from the plan are covered by focused runtime, service, HTTP, reducer, and E2E tests.
@@ -78,10 +96,10 @@ Real Codex was not called during verification; the deterministic fixture reprodu
 | Command | Result |
 |---|---|
 | `pnpm typecheck` | Pass, both TypeScript configurations |
-| `pnpm test` | Pass, 20 files / 309 tests |
+| `pnpm test` | Pass, 20 files / 314 tests |
 | `pnpm build` | Pass, Vite 24 modules plus server TypeScript build |
 | `pnpm test:e2e` | Pass, Chromium 10/10 |
-| Focused runtime/client suites | Pass, 5 files / 164 tests |
+| Focused runtime/client suites | Pass, 5 files / 168 tests |
 | `git diff --check origin/feature/taskmux-text-v1..HEAD` | Pass |
 
 The repository does not define `lint` or `check` scripts. Playwright reported that WebSocket port 24678 was already occupied by the intentionally running 4317 development instance; each E2E harness used isolated ephemeral HTTP state and all tests exited cleanly.
