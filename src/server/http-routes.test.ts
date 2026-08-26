@@ -10,6 +10,7 @@ import type {
 } from "../shared/contracts.js"
 import type { AgentAdapter, AgentAdapterEvent } from "./agent/agent-adapter.js"
 import { buildApp, type AppHealth } from "./app.js"
+import { CodexRequestError } from "./codex/json-rpc-client.js"
 import type { ServerConfig } from "./config.js"
 import { ConversationRepository } from "./conversation-repository.js"
 import { openDatabase } from "./database.js"
@@ -31,6 +32,7 @@ class FakeAgentAdapter implements AgentAdapter {
   }> = []
   readonly histories = new Map<string, MessageTurn[]>()
   createSessionError: Error | undefined
+  sendTextError: Error | undefined
 
   #nextSessionId = 1
   #nextTurnId = 1
@@ -58,6 +60,7 @@ class FakeAgentAdapter implements AgentAdapter {
     operationId: string
   ): Promise<{ turnId: string }> {
     this.sendTextCalls.push({ externalSessionId, text, operationId })
+    if (this.sendTextError) throw this.sendTextError
     this.#operationIds.set(externalSessionId, operationId)
     return { turnId: `turn-${this.#nextTurnId++}` }
   }
@@ -378,6 +381,34 @@ describe("HTTP routes", () => {
     expect(actualConflict.statusCode).toBe(409)
     expect(actualConflict.json().error.code).toBe("turn_conflict")
     expect(harness.adapter.sendTextCalls.map(({ text }) => text)).toEqual(["one"])
+  })
+
+  it("returns a sanitized 503 for a typed Codex request failure", async () => {
+    const harness = await createHarness()
+    const conversation = await createConversation(harness)
+    harness.adapter.sendTextError = new CodexRequestError({
+      code: "codex_request_failed",
+      message: "private internal error text",
+      publicMessage: "timeout waiting for child process to exit",
+      method: "turn/start",
+      recoverable: true,
+    })
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversation.id}/messages`,
+      payload: { text: "hello" },
+    })
+
+    expect(response.statusCode).toBe(503)
+    expect(response.json()).toEqual({
+      error: {
+        code: "codex_request_failed",
+        message: "timeout waiting for child process to exit",
+      },
+    })
+    expect(response.body).not.toContain("private internal error text")
+    expect(harness.repository.getById(conversation.id)?.status).toBe("failed")
   })
 
   it.each([

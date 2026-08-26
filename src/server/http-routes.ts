@@ -5,6 +5,7 @@ import {
   ConversationService,
   ConversationServiceError,
 } from "./conversation-service.js"
+import { CodexRequestError } from "./codex/json-rpc-client.js"
 import type { EventHub } from "./event-hub.js"
 
 const MAX_CLIENT_REQUEST_ID_CODE_POINTS = 128
@@ -243,6 +244,13 @@ function mapError(value: unknown): {
   message: string
 } {
   const error = normalizeError(value)
+  if (error instanceof CodexRequestError) {
+    return {
+      statusCode: 503,
+      code: error.code,
+      message: error.publicMessage,
+    }
+  }
   if (error instanceof HttpInputError) {
     return { statusCode: 400, code: error.code, message: error.message }
   }

@@ -583,6 +583,32 @@ describe("App", () => {
     ).not.toBeInTheDocument()
   })
 
+  it("shows a safe Codex request error instead of the generic send failure", async () => {
+    const user = userEvent.setup()
+    render(
+      <App
+        api={fakeApi({
+          listConversations: async () => [first],
+          sendMessage: async () => {
+            throw new TaskMuxApiError(
+              "codex_request_failed",
+              "timeout waiting for child process to exit",
+              503
+            )
+          },
+        })}
+      />
+    )
+    await screen.findByText("还没有已完成的消息。")
+
+    await user.type(screen.getByRole("textbox", { name: "消息" }), "重试{enter}")
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "timeout waiting for child process to exit"
+    )
+    expect(screen.getByRole("alert")).not.toHaveTextContent("发送失败，请重试。")
+  })
+
   it("keeps an SSE-accepted optimistic message when the HTTP transport response is lost", async () => {
     installEventSource()
     const response = deferred<{ accepted: true }>()

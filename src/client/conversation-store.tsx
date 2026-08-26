@@ -178,6 +178,7 @@ export type ConversationAction =
       type: "sendTransportRejected"
       conversationId: string
       requestId: string
+      message: string
     }
   | { type: "sendConflict"; conversationId: string; requestId: string }
   | {
@@ -528,7 +529,7 @@ export function conversationReducer(
                 (current) => ({ ...current, state: "tombstone" })
               )
             ),
-        sendError: "发送失败，请重试。",
+        sendError: action.message,
         error: live.error,
       }
       const next = withLive(state, action.conversationId, nextLive)
@@ -1451,6 +1452,10 @@ export function ConversationProvider({
                   type: "sendTransportRejected",
                   conversationId,
                   requestId,
+                  message:
+                    error instanceof TaskMuxApiError
+                      ? error.message
+                      : "发送失败，请重试。",
                 }
           )
         }

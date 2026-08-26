@@ -630,6 +630,7 @@ describe("live conversation reducer", () => {
       type: "sendTransportRejected",
       conversationId: "c1",
       requestId: "send-1",
+      message: "发送失败，请重试。",
     })
     expect(selectDisplayedTurns(state, "c1")).toEqual([])
     expect(state.summariesById.c1?.status).toBe("idle")
@@ -651,6 +652,7 @@ describe("live conversation reducer", () => {
       type: "sendTransportRejected",
       conversationId: "c1",
       requestId: "send-2",
+      message: "发送失败，请重试。",
     })
     expect(selectDisplayedTurns(state, "c1").at(-1)?.text).toBe(
       "已被服务接受"
@@ -676,6 +678,7 @@ describe("live conversation reducer", () => {
         type: "sendTransportRejected",
         conversationId: "c1",
         requestId: "send-evidence",
+        message: "发送失败，请重试。",
       })
 
       expect(
@@ -725,6 +728,7 @@ describe("live conversation reducer", () => {
         type: "sendTransportRejected",
         conversationId: "c1",
         requestId: "send-new",
+        message: "发送失败，请重试。",
       })
 
       expect(
@@ -829,6 +833,7 @@ describe("live conversation reducer", () => {
       type: "sendTransportRejected",
       conversationId: "c1",
       requestId: "send-rejected-late",
+      message: "发送失败，请重试。",
     })
 
     expect(selectDisplayedTurns(state, "c1").map((turn) => turn.text)).toEqual([
@@ -959,6 +964,7 @@ describe("live conversation reducer", () => {
         type: "sendTransportRejected",
         conversationId: "c1",
         requestId: "send-uncertain",
+        message: "发送失败，请重试。",
       })
 
       expect(selectDisplayedTurns(state, "c1")).toEqual([])
@@ -991,6 +997,7 @@ describe("live conversation reducer", () => {
         type: "sendTransportRejected",
         conversationId: "c1",
         requestId: "send-old",
+        message: "发送失败，请重试。",
       })
       state = conversationReducer(state, {
         type: "sendOptimistic",
@@ -1013,6 +1020,7 @@ describe("live conversation reducer", () => {
         type: "sendTransportRejected",
         conversationId: "c1",
         requestId: "send-new",
+        message: "发送失败，请重试。",
       })
 
       expect(
@@ -1037,6 +1045,7 @@ describe("live conversation reducer", () => {
           type: "sendTransportRejected",
           conversationId: "c1",
           requestId: `send-${index}`,
+          message: "发送失败，请重试。",
         })
       }
 
@@ -1196,6 +1205,7 @@ describe("live conversation reducer", () => {
         type: "sendTransportRejected",
         conversationId: "c1",
         requestId: "send-before-reopen",
+        message: "发送失败，请重试。",
       })
       state = conversationReducer(state, { type: "streamReopened", epoch: 1 })
       state = conversationReducer(state, {
@@ -1247,6 +1257,7 @@ describe("live conversation reducer", () => {
         type: "sendTransportRejected",
         conversationId: "c1",
         requestId: "send-old-terminal",
+        message: "发送失败，请重试。",
       })
       state = conversationReducer(state, {
         type: "sendOptimistic",
@@ -1306,6 +1317,7 @@ describe("live conversation reducer", () => {
         type: "sendTransportRejected",
         conversationId: "c1",
         requestId: "send-old-session",
+        message: "发送失败，请重试。",
       })
       state = conversationReducer(state, {
         type: "sendOptimistic",
