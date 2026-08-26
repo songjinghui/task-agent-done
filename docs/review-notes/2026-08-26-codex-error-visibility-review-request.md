@@ -15,7 +15,10 @@ Review-Target-ID: `fix-codex-error-visibility`
 
 Branch: `fix/codex-error-visibility`
 
-Range: `75e074a..10f08d8`
+Review snapshot: `75e074a..2796612`
+
+The later commit that records this documentation-only review correction is not
+part of the implementation review scope.
 
 ## What
 
@@ -106,8 +109,14 @@ running TaskMux instance on 4317. E2E HTTP servers use isolated ephemeral ports.
 
 ## Next Action
 
-Please perform a read-only independent formal review of `75e074a..10f08d8`
+Please perform a read-only independent formal review of `75e074a..2796612`
 against the approved design and plan. Check correctness, provider-error privacy,
 client state transitions, fixture realism, and test strength. Return Critical /
 Important / Minor findings with file:line references and a clear
-APPROVE / REQUEST CHANGES verdict covering HEAD `10f08d8`.
+APPROVE / REQUEST CHANGES verdict covering snapshot HEAD `2796612`.
+
+## Formal Review Result
+
+The independent reviewer approved snapshot HEAD `2796612` with no Critical or
+Important findings. The only Minor was the stale review-range text corrected by
+this note amendment.
