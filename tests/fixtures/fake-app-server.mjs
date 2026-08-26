@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process"
-import { existsSync, readFileSync, writeFileSync } from "node:fs"
+import { closeSync, existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import readline from "node:readline"
 
@@ -377,6 +377,17 @@ function handleRequest(message) {
     })
     return
   }
+  if (message.method === "test/internal-business-error") {
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      error: {
+        code: -32603,
+        message: "You've hit your usage limit. Try again later.",
+      },
+    })
+    return
+  }
   if (message.method === "test/path-error") {
     send({
       jsonrpc: "2.0",
@@ -384,6 +395,18 @@ function handleRequest(message) {
       error: {
         code: -32002,
         message: "failed to load /private/secret/config.toml",
+      },
+    })
+    return
+  }
+  if (message.method === "test/sensitive-error") {
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      error: {
+        code: -32002,
+        message:
+          "OPENAI_API_KEY=sk-private failed at file:///Users/alice/.codex/config.toml and \\\\server\\share\\secret.txt\n    at refreshModels (/Users/alice/taskmux/app.js:42:7)",
       },
     })
     return
@@ -432,7 +455,14 @@ input.on("line", (line) => {
   if (Object.hasOwn(message ?? {}, "jsonrpc") && message.jsonrpc !== "2.0") return
   if (typeof message.method === "string") {
     if (Object.hasOwn(message, "id")) handleRequest(message)
-    if (message.method === "initialized") initialized = true
+    if (message.method === "initialized") {
+      initialized = true
+      if (process.argv.includes("--close-stdin-after-initialize")) {
+        input.close()
+        closeSync(0)
+        setInterval(() => {}, 1_000)
+      }
+    }
     return
   }
   if (Object.hasOwn(message ?? {}, "id")) handleResponse(message)

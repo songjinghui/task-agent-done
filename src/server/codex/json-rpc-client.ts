@@ -39,7 +39,9 @@ export class CodexRequestError extends Error {
     this.name = "CodexRequestError"
     this.code = options.code
     this.method = options.method
-    this.publicMessage = options.publicMessage ?? options.message
+    this.publicMessage = sanitizePublicErrorMessage(
+      options.publicMessage ?? options.message
+    )
     this.recoverable = options.recoverable
   }
 }
@@ -98,7 +100,12 @@ export class CodexJsonRpcClient {
 
   request<T>(method: string, params?: unknown, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS): Promise<T> {
     if (this.#state !== "started") {
-      return Promise.reject(new Error("app_server_not_started"))
+      if (this.#state !== "stopped") {
+        return Promise.reject(new Error("app_server_not_started"))
+      }
+      const error = stoppedRequestError(method)
+      this.#emitRequestFailure(error)
+      return Promise.reject(error)
     }
     return this.#request(method, params, timeoutMs)
   }
@@ -140,7 +147,9 @@ export class CodexJsonRpcClient {
       } catch (error) {
         clearTimeout(timeout)
         this.#pendingRequests.delete(id)
-        reject(error instanceof Error ? error : new Error(String(error)))
+        const requestError = stoppedRequestError(method)
+        this.#emitRequestFailure(requestError)
+        reject(requestError)
       }
     })
   }
@@ -219,18 +228,33 @@ export class CodexJsonRpcClient {
     child.stderr.on("data", (chunk: Buffer) => {
       this.#stderr += chunk.toString()
     })
+    child.stdin.on("error", () => {
+      this.#failPendingRequests(
+        "app_server_stopped",
+        "Codex App Server stopped accepting requests."
+      )
+    })
     child.on("error", (error) => {
       this.#emit({ type: "protocol_error", message: error.message })
       this.#state = "stopped"
-      this.#rejectPending(new Error("app_server_exited"))
+      this.#failPendingRequests(
+        "app_server_exited",
+        "Codex App Server exited unexpectedly."
+      )
     })
     child.once("exit", (code, signal) => {
       this.#state = "stopped"
-      this.#rejectPending(new Error("app_server_exited"))
+      this.#failPendingRequests(
+        "app_server_exited",
+        "Codex App Server exited unexpectedly."
+      )
     })
     child.once("close", (code, signal) => {
       this.#state = "stopped"
-      this.#rejectPending(new Error("app_server_exited"))
+      this.#failPendingRequests(
+        "app_server_exited",
+        "Codex App Server exited unexpectedly."
+      )
       this.#emit({ type: "exit", code, signal, stderr: this.#stderr })
     })
   }
@@ -332,6 +356,23 @@ export class CodexJsonRpcClient {
     this.#pendingRequests.clear()
   }
 
+  #failPendingRequests(code: string, publicMessage: string): void {
+    const pendingRequests = [...this.#pendingRequests.values()]
+    this.#pendingRequests.clear()
+    for (const pending of pendingRequests) {
+      clearTimeout(pending.timeout)
+      const error = new CodexRequestError({
+        code,
+        message: code,
+        method: pending.method,
+        publicMessage,
+        recoverable: true,
+      })
+      this.#emitRequestFailure(error)
+      pending.reject(error)
+    }
+  }
+
   #emitRequestFailure(error: CodexRequestError): void {
     this.#emit({
       type: "request_failure",
@@ -362,15 +403,14 @@ function isJsonRpcId(value: unknown): value is JsonRpcId {
 }
 
 function toResponseError(method: string, value: unknown): CodexRequestError {
-  const upstreamCode = isRecord(value) ? value.code : undefined
   const message = sanitizedErrorMessage(value)
   return new CodexRequestError({
     code: "codex_request_failed",
     message,
     method,
-    recoverable:
-      upstreamCode === -32603 ||
-      message.toLowerCase().includes("timeout waiting for child process to exit"),
+    recoverable: message
+      .toLowerCase()
+      .includes("timeout waiting for child process to exit"),
   })
 }
 
@@ -378,8 +418,30 @@ function sanitizedErrorMessage(value: unknown): string {
   if (!isRecord(value) || typeof value.message !== "string") {
     return "Codex App Server request failed."
   }
-  const sanitized = value.message
+  return sanitizePublicErrorMessage(value.message)
+}
+
+function stoppedRequestError(method: string): CodexRequestError {
+  return new CodexRequestError({
+    code: "app_server_stopped",
+    message: "app_server_stopped",
+    method,
+    publicMessage: "Codex App Server stopped accepting requests.",
+    recoverable: true,
+  })
+}
+
+function sanitizePublicErrorMessage(message: string): string {
+  const firstLine = message.split(/\r?\n/, 1)[0] ?? ""
+  const sanitized = firstLine
     .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(
+      /\b([A-Za-z_][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|AUTH)[A-Za-z0-9_]*)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      "$1=[redacted]"
+    )
+    .replace(/file:\/\/\/?[^\s)"'`,;]*/gi, "[path]")
+    .replace(/(^|[\s("'`])(?:\\\\|\/\/)[^\s)"'`,;]*/g, "$1[path]")
+    .replace(/(^|[\s("'`])~[\\/][^\s)"'`,;]*/g, "$1[path]")
     .replace(
       /(^|[\s("'`])(?:[A-Za-z]:[\\/]|\/)[^\s)"'`,;]*/g,
       "$1[path]"

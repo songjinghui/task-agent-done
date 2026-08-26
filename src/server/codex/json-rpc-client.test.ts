@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import {
+  CodexRequestError,
   CodexJsonRpcClient,
   type CodexJsonRpcClientEvent,
   type CodexProcessOptions,
@@ -56,6 +57,18 @@ function nextEvent(
 }
 
 describe("CodexJsonRpcClient", () => {
+  it("sanitizes a default public message at the typed error boundary", () => {
+    const error = new CodexRequestError({
+      code: "codex_request_failed",
+      message: "OPENAI_API_KEY=sk-private at file:///Users/alice/config.toml",
+      method: "turn/start",
+      recoverable: false,
+    })
+
+    expect(error.publicMessage).toBe("OPENAI_API_KEY=[redacted] at [path]")
+    expect(error.message).toContain("sk-private")
+  })
+
   it("accepts a split handshake response and correlates thread/start responses", async () => {
     const workspace = createWorkspace()
     const client = new CodexJsonRpcClient(fakeProcessOptions(workspace))
@@ -256,6 +269,15 @@ describe("CodexJsonRpcClient", () => {
     expect(JSON.stringify(events)).not.toContain("private-thread-id")
   })
 
+  it("does not treat an unknown internal response as recoverable", async () => {
+    const { client } = await startClient()
+
+    await expect(client.request("test/internal-business-error")).rejects.toMatchObject({
+      name: "CodexRequestError",
+      recoverable: false,
+    })
+  })
+
   it("redacts filesystem paths from the public request error message", async () => {
     const { client } = await startClient()
     const events: CodexJsonRpcClientEvent[] = []
@@ -265,6 +287,51 @@ describe("CodexJsonRpcClient", () => {
       publicMessage: "failed to load [path]",
     })
     expect(JSON.stringify(events)).not.toContain("/private/secret")
+  })
+
+  it("redacts environment values, file URIs, UNC paths, and stack lines", async () => {
+    const { client } = await startClient()
+    const events: CodexJsonRpcClientEvent[] = []
+    client.subscribe((event) => events.push(event))
+
+    const rejection = client.request("test/sensitive-error")
+    await expect(rejection).rejects.toMatchObject({
+      publicMessage: expect.stringContaining("OPENAI_API_KEY=[redacted]"),
+    })
+    const serialized = JSON.stringify(events)
+    expect(serialized).not.toContain("sk-private")
+    expect(serialized).not.toContain("file://")
+    expect(serialized).not.toContain("Users/alice")
+    expect(serialized).not.toContain("server\\\\share")
+    expect(serialized).not.toContain("refreshModels")
+  })
+
+  it("emits a recoverable typed failure when an installed child stops accepting stdin", async () => {
+    const workspace = createWorkspace()
+    const client = new CodexJsonRpcClient({
+      command: process.execPath,
+      args: [fixturePath, "--close-stdin-after-initialize"],
+      cwd: workspace,
+    })
+    clients.push(client)
+    const events: CodexJsonRpcClientEvent[] = []
+    client.subscribe((event) => events.push(event))
+    await client.start({ name: "taskmux", title: "TaskMux", version: "0.1.0" })
+    await new Promise((resolve) => setTimeout(resolve, 25))
+
+    await expect(client.request("turn/start", {})).rejects.toMatchObject({
+      name: "CodexRequestError",
+      code: "app_server_stopped",
+      method: "turn/start",
+      recoverable: true,
+    })
+    expect(events).toContainEqual({
+      type: "request_failure",
+      code: "app_server_stopped",
+      method: "turn/start",
+      message: "Codex App Server stopped accepting requests.",
+      recoverable: true,
+    })
   })
 
   it("delivers command approvals and sends an explicit response", async () => {
