@@ -285,10 +285,28 @@ function handleRequest(message) {
     return
   }
   if (message.method === "turn/start") {
+    const prompt = promptFrom(message.params)
+    if (prompt.includes("[request-recovery]") && !state.requestRecoveryUsed) {
+      state.requestRecoveryUsed = true
+      saveState()
+      send({
+        jsonrpc: "2.0",
+        id: message.id,
+        error: {
+          code: -32603,
+          message: "timeout waiting for child process to exit",
+          data: {
+            path: "/private/fake-app-server-state",
+            prompt: "must not cross the TaskMux boundary",
+          },
+        },
+      })
+      return
+    }
     const turn = {
       id: `turn_${state.nextTurn++}`,
       threadId: message.params?.threadId ?? "thr_1",
-      prompt: promptFrom(message.params),
+      prompt,
       completed: false,
     }
     turns.set(turn.id, turn)
@@ -355,6 +373,17 @@ function handleRequest(message) {
         code: -32002,
         message: "thread_not_found",
         data: { threadId: "private-thread-id" },
+      },
+    })
+    return
+  }
+  if (message.method === "test/path-error") {
+    send({
+      jsonrpc: "2.0",
+      id: message.id,
+      error: {
+        code: -32002,
+        message: "failed to load /private/secret/config.toml",
       },
     })
     return

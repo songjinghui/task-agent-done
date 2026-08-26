@@ -144,6 +144,31 @@ test("restarts the fake App Server once and continues serving the same page", as
   await expect(page.getByLabel("Assistant 消息")).toContainText("hello world")
 })
 
+test("recovers a rejected turn/start and accepts the next explicit send", async ({
+  page,
+  taskmux,
+}) => {
+  await page.goto(taskmux.address)
+  await createConversation(page)
+  await send(page, "[request-recovery] first attempt")
+
+  await expect(page.getByRole("alert")).toContainText(
+    "timeout waiting for child process to exit"
+  )
+  await expect(page.getByText(/private\/fake-app-server-state|must not cross/i)).toHaveCount(0)
+  await expect.poll(() => taskmux.clientStarts).toBe(2)
+  await expect.poll(() => taskmux.readyClientStarts).toBe(2)
+  await expect(page.getByLabel("用户消息")).toHaveCount(0)
+
+  await send(page, "hello after request recovery")
+  await expect(page.getByLabel("用户消息")).toHaveCount(1)
+  await expect(page.getByLabel("用户消息")).toContainText(
+    "hello after request recovery"
+  )
+  await expect(page.getByLabel("Assistant 消息")).toContainText("hello world")
+  expect(taskmux.clientStarts).toBe(2)
+})
+
 test("degrades after a second consecutive crash and shows a stable manual action", async ({
   page,
   taskmux,

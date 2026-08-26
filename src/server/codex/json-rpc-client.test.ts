@@ -256,6 +256,17 @@ describe("CodexJsonRpcClient", () => {
     expect(JSON.stringify(events)).not.toContain("private-thread-id")
   })
 
+  it("redacts filesystem paths from the public request error message", async () => {
+    const { client } = await startClient()
+    const events: CodexJsonRpcClientEvent[] = []
+    client.subscribe((event) => events.push(event))
+
+    await expect(client.request("test/path-error")).rejects.toMatchObject({
+      publicMessage: "failed to load [path]",
+    })
+    expect(JSON.stringify(events)).not.toContain("/private/secret")
+  })
+
   it("delivers command approvals and sends an explicit response", async () => {
     const { client, workspace } = await startClient()
     const thread = await client.request<{ thread: { id: string } }>("thread/start", {

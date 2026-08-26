@@ -380,6 +380,10 @@ function sanitizedErrorMessage(value: unknown): string {
   }
   const sanitized = value.message
     .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(
+      /(^|[\s("'`])(?:[A-Za-z]:[\\/]|\/)[^\s)"'`,;]*/g,
+      "$1[path]"
+    )
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, 500)
