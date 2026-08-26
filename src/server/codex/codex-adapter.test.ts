@@ -670,7 +670,42 @@ describe("CodexAppServerAdapter", () => {
     ])
   })
 
-  it("emits sanitized errors for failed and unsupported terminal turn statuses", async () => {
+  it("forwards selected Codex error fields for a failed terminal turn", async () => {
+    const { adapter, events, fake } = setup()
+    fake.enqueue("turn/start", { turn: { id: "turn_failed" } })
+    await adapter.sendText("thr_failed", "seed failed", "operation-failed")
+
+    fake.emit(
+      notification("turn/completed", {
+        threadId: "thr_failed",
+        turn: {
+          id: "turn_failed",
+          status: "failed",
+          items: [],
+          error: {
+            codexErrorInfo: "usageLimitExceeded",
+            message: "You've hit your usage limit. Try again later.",
+            additionalDetails: "must not escape",
+          },
+        },
+      })
+    )
+
+    expect(events).toEqual([
+      event("thr_failed", {
+        type: "error",
+        code: "usageLimitExceeded",
+        message: "You've hit your usage limit. Try again later.",
+        terminal: true,
+        scope: "turn",
+        turnId: "turn_failed",
+      }, "operation-failed"),
+    ])
+    expect(JSON.stringify(events)).not.toContain("additionalDetails")
+    expect(JSON.stringify(events)).not.toContain("must not escape")
+  })
+
+  it("falls back for malformed failed terminal errors and unsupported statuses", async () => {
     const { adapter, events, fake } = setup()
     fake.enqueue("turn/start", { turn: { id: "turn_failed" } })
     await adapter.sendText("thr_failed", "seed failed", "operation-failed")
@@ -684,7 +719,11 @@ describe("CodexAppServerAdapter", () => {
           id: "turn_failed",
           status: "failed",
           items: [],
-          error: { message: "private provider failure detail" },
+          error: {
+            codexErrorInfo: "   ",
+            message: 42,
+            additionalDetails: "must not escape",
+          },
         },
       })
     )
@@ -718,6 +757,8 @@ describe("CodexAppServerAdapter", () => {
         turnId: "turn_unknown",
       }, "operation-unknown"),
     ])
+    expect(JSON.stringify(events)).not.toContain("additionalDetails")
+    expect(JSON.stringify(events)).not.toContain("must not escape")
   })
 
   it("fails every active session and clears transient state when the transport exits", async () => {

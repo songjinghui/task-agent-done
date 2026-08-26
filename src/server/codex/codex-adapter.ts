@@ -349,13 +349,11 @@ export class CodexAppServerAdapter implements AgentAdapter {
       this.#emitTurnEvent(threadId, turnId, { type: "turn_completed", turnId })
       return
     }
+    const failure = status === "failed" ? failedTurnError(turn) : undefined
     this.#emitTurnEvent(threadId, turnId, {
       type: "error",
-      code: status === "failed" ? "turn_failed" : "unsupported_turn_status",
-      message:
-        status === "failed"
-          ? "Agent turn failed."
-          : "Agent turn ended with an unsupported status.",
+      code: failure?.code ?? "unsupported_turn_status",
+      message: failure?.message ?? "Agent turn ended with an unsupported status.",
       terminal: true,
       scope: "turn",
       turnId,
@@ -724,6 +722,17 @@ function normalizeCompletedToolStatus(status: unknown): ToolStatus["status"] {
   return "completed"
 }
 
+function failedTurnError(turn: Record<string, unknown>): {
+  code: string
+  message: string
+} {
+  const error = recordField(turn, "error")
+  return {
+    code: nonBlankStringField(error, "codexErrorInfo") ?? "turn_failed",
+    message: nonBlankStringField(error, "message") ?? "Agent turn failed.",
+  }
+}
+
 function isCodexAgentMessageItem(value: CodexItem): value is CodexAgentMessageItem {
   return (
     value.type === "agentMessage" &&
@@ -766,6 +775,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function stringField(record: Record<string, unknown>, key: string): string | undefined {
   const value = record[key]
   return typeof value === "string" ? value : undefined
+}
+
+function nonBlankStringField(
+  record: Record<string, unknown> | undefined,
+  key: string
+): string | undefined {
+  if (!record) return undefined
+  const value = stringField(record, key)
+  return value?.trim() ? value : undefined
 }
 
 function recordField(
