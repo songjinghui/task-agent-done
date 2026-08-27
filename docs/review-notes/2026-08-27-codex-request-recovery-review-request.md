@@ -13,7 +13,7 @@ created: 2026-08-27
 Review-Target-ID: fix-codex-request-recovery
 Branch: fix/codex-request-recovery
 Base: `origin/feature/taskmux-text-v1` (`0189b38`)
-HEAD: `e7bd3da`
+Code HEAD after review round 1 fixes: `e5ef568`
 
 ## What
 
@@ -83,6 +83,14 @@ Total findings: 2 (0 Critical, 2 Important, 0 Minor)
 | FC-1 | `publicMessage` could expose env values, file URIs, UNC paths, and stack lines | fixed in `803c275` with response and constructor-boundary tests | resolved |
 | FC-2 | stopped stdin could reject untyped and leave a bad client installed | fixed in `803c275` with a real live-child stdin fixture | resolved |
 
+Formal review round 1 verdict was NOT APPROVED with two Important and one Minor:
+
+| # | Finding | Author disposition | Status |
+|---|---|---|---|
+| FR-1 | FC-1 sanitizer remained blacklist-based and leaked authorization/cwd/prompt variants | replaced by fail-closed diagnostic allowlist in `e5ef568` | resolved |
+| FR-2 | immediate retry could hit unavailable before replacement ready | replaceable adapter holds explicit operations through delayed stop/start in `e5ef568` | resolved |
+| FR-3 | automatic recovery could briefly show manual restart action | automatic in-progress health remains ok; degraded action only after failure/exhaustion in `e5ef568` | resolved |
+
 Formal reviewer: please label findings `[FC:covered]`, `[FC:new]`, or `[FC:N/A]`.
 
 ## Next Action
@@ -121,10 +129,10 @@ evidence. Architecture map delta is none; artifact and fallback scans passed.
 
 ```text
 pnpm typecheck                 PASS
-pnpm test                      PASS, 20 files / 314 tests
+pnpm test                      PASS, 20 files / 322 tests
 pnpm build                     PASS, Vite 24 modules + server TypeScript
 pnpm test:e2e                  PASS, Chromium 10/10
-focused high-risk suites       PASS, 5 files / 168 tests
+focused high-risk suites       PASS, 5 files / 176 tests
 git diff --check               PASS
 ```
 

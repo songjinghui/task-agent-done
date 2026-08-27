@@ -21,7 +21,7 @@ This change covers request-level failures that happen before Codex accepts a tur
 
 ## Failure Classification
 
-The JSON-RPC client retains a stable TaskMux error code, the upstream message, the method, and whether the failure is recoverable. It never forwards the JSON-RPC `data` object, stack traces, stderr, environment variables, paths, request payloads, or raw protocol frames.
+The JSON-RPC client retains a stable TaskMux error code, the upstream message, the method, and whether the failure is recoverable. Its browser-facing message is fail-closed: only explicit safe diagnostic signatures are normalized and exposed; every unknown upstream message becomes a fixed provider-failure message. It never forwards the JSON-RPC `data` object, stack traces, stderr, environment variables, paths, request payloads, authorization fields, or raw protocol frames.
 
 Recoverable request failures are transport/protocol failures and Codex internal request failures that indicate a temporarily unusable App Server, including request timeout, stopped/exited process, invalid protocol response, and the observed model-refresh child-process timeout. Business and operator-action errors remain non-recoverable.
 
@@ -31,7 +31,7 @@ Unknown errors are not automatically treated as recoverable. They remain safe se
 
 The runtime supervisor observes typed recoverable failures for `turn/start`. The failed HTTP request is not retried: this prevents duplicate turns when acceptance is uncertain. Conversation ownership is released by the existing service failure path.
 
-After the failed request settles, the supervisor replaces the Codex client and adapter once using the existing restart budget and stale-client isolation. A successful replacement returns health to `ok`, so the next explicit operator send uses the new App Server. If replacement fails, or another recoverable failure occurs before a later owned turn completes, health becomes `degraded` and the existing stable restart action remains available.
+After the failed request settles, the supervisor replaces the Codex client and adapter once using the existing restart budget and stale-client isolation. An explicit operator retry issued while replacement is still in progress waits at the existing replaceable-adapter boundary and then uses the new App Server; the original failed prompt is never replayed. Automatic recovery does not show a manual-restart diagnostic while it is still progressing. If replacement fails, or another recoverable failure occurs before a later owned turn completes, the waiting retry is released with failure, health becomes `degraded`, and the existing stable restart action becomes available.
 
 Events and async completions from the retired client cannot mutate the replacement adapter, conversation status, or restart budget.
 
@@ -41,7 +41,7 @@ Known provider request errors no longer fall through to `internal_error`:
 
 - HTTP status: `503`
 - stable code: `codex_request_failed` for typed Codex request rejection, or the existing stable transport code when one already exists
-- message: the sanitized upstream Codex message when present; otherwise a fixed provider-unavailable message
+- message: a fixed normalization of an explicit safe Codex diagnostic signature; otherwise a fixed provider-unavailable message
 
 The Composer displays that safe API message for a rejected send. Genuine unclassified TaskMux defects continue to return the fixed `internal_error` response.
 
@@ -54,6 +54,7 @@ The Composer displays that safe API message for a rejected send. Genuine unclass
 - INV-5: A retired client cannot publish current events or change health.
 - INV-6: Provider error exposure is limited to stable code plus sanitized message.
 - INV-7: After successful replacement, the next explicit send can start normally.
+- INV-8: An explicit retry during replacement waits for that replacement and cannot hit the temporary unavailable adapter.
 
 ## Test Strategy
 

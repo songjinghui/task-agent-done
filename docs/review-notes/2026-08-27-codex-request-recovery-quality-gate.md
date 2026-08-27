@@ -24,8 +24,8 @@ Original operator requirement: a failed previous send must not make later sends 
 | Transiently unhealthy App Server is replaced once | Pass | Runtime tests cover one replacement, duplicate exit suppression, budget exhaustion, and stale-client isolation |
 | Prompt is not automatically replayed | Pass | Runtime and browser tests assert the replacement receives nothing until the operator sends again |
 | Business errors do not restart Codex | Pass | Non-recoverable JSON-RPC error stays on the current client |
-| Error is useful and safe | Pass | Typed 503 carries sanitized Codex message; JSON-RPC `data`, raw request, paths, stderr, and private fixture fields do not cross the boundary |
-| Next explicit send works after replacement | Pass | Playwright observes failed request, two ready clients, then `hello world` from the explicit retry |
+| Error is useful and safe | Pass | Typed 503 carries only an allowlisted diagnostic; unknown detail, auth, env, payload, JSON-RPC `data`, paths, and stderr do not cross the boundary |
+| Next explicit send works through replacement | Pass | Delayed runtime tests hold an immediate retry; Playwright retries before waiting for readiness and receives `hello world` |
 | Repeated failure does not loop | Pass | Second recoverable failure degrades health and starts no third client |
 
 ## Fresh-Context Disposition
@@ -46,9 +46,18 @@ rerun then exposed an exit/request ordering regression; `e7bd3da` preserves exit
 supervision and adds the stable manual restart action for repeated request
 failures.
 
+Formal review round 1 found two additional Important issues and one related
+Minor. `e5ef568` resolves all three with RED/GREEN coverage:
+
+| Finding | Disposition | Evidence |
+|---|---|---|
+| Remaining blacklist gaps could expose authorization, cwd, prompt, or colon-form env fields | Replaced blacklist with fail-closed diagnostic allowlist | Constructor and HTTP boundary tests cover all reviewer examples; unknown detail is fixed generic text |
+| Immediate explicit retry could hit the temporary unavailable adapter | Existing replaceable adapter now holds operations until replacement settles | Delayed stop and delayed start test proves retry remains pending and reaches only the replacement |
+| Automatic recovery could display the manual restart action before recovery finished | Health stays `ok` during the bounded automatic replacement; degraded/manual action appears only on failure or exhausted budget | Runtime test checks in-progress and failed health; full browser crash/request recovery paths pass |
+
 ## Stateful Invariants
 
-- INV-1 through INV-7 from the plan are covered by focused runtime, service, HTTP, reducer, and E2E tests.
+- INV-1 through INV-8 from the plan are covered by focused runtime, service, HTTP, reducer, and E2E tests.
 - Runtime provider generation remains owned by `startTaskMux`; no parallel supervisor or adapter was introduced.
 - Conversation send ownership remains owned by `ConversationService`.
 - Client attempt ownership remains owned by the existing conversation reducer.
@@ -96,10 +105,10 @@ Real Codex was not called during verification; the deterministic fixture reprodu
 | Command | Result |
 |---|---|
 | `pnpm typecheck` | Pass, both TypeScript configurations |
-| `pnpm test` | Pass, 20 files / 314 tests |
+| `pnpm test` | Pass, 20 files / 322 tests |
 | `pnpm build` | Pass, Vite 24 modules plus server TypeScript build |
 | `pnpm test:e2e` | Pass, Chromium 10/10 |
-| Focused runtime/client suites | Pass, 5 files / 168 tests |
+| Focused runtime/client suites | Pass, 5 files / 176 tests |
 | `git diff --check origin/feature/taskmux-text-v1..HEAD` | Pass |
 
 The repository does not define `lint` or `check` scripts. Playwright reported that WebSocket port 24678 was already occupied by the intentionally running 4317 development instance; each E2E harness used isolated ephemeral HTTP state and all tests exited cleanly.

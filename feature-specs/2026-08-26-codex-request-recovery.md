@@ -12,7 +12,7 @@ created: 2026-08-26
 
 **Feature:** TaskMux Text Workbench V1 — Codex request recovery
 **Goal:** A pre-acceptance `turn/start` failure reports a safe useful error, releases ownership, replaces a transiently unhealthy Codex App Server once, and permits the next explicit send.
-**Acceptance Criteria:** No automatic prompt retry; safe 503 response; transient request failure consumes one restart; business failure consumes none; stale client isolation; next explicit send succeeds after replacement; repeat failure degrades health.
+**Acceptance Criteria:** No automatic prompt retry; fail-closed 503 response with allowlisted diagnostics; transient request failure consumes one restart; business failure consumes none; stale client isolation; an immediate next explicit send waits for replacement; repeat failure degrades health.
 **Architecture cell:** provider runtime / conversation transport
 **Map delta:** none
 **Map delta why:** This extends the existing Codex client, replaceable adapter, and runtime supervisor ownership boundaries without adding a new subsystem.
@@ -34,9 +34,10 @@ Owner: `startTaskMux`.
 
 | State | Event | Next state | Effect |
 |---|---|---|---|
-| current, budget=1 | recoverable `turn/start` failure | restarting, budget=0 | retire client, make proxy unavailable, start one replacement |
+| current, budget=1 | recoverable `turn/start` failure | restarting, budget=0 | retire client, begin one replacement, hold explicit adapter operations |
+| restarting | explicit operator retry | restarting | wait at replaceable-adapter boundary; never replay the failed prompt |
 | restarting | replacement ready | current, awaiting completion | install replacement, health ok |
-| restarting | replacement fails | degraded | stable health error, no loop |
+| restarting | replacement fails | degraded | release waiters with failure, stable health error, no loop |
 | current, budget=0 | another recoverable failure | degraded | retire client, no restart |
 | awaiting completion | owned `turn_completed` | current, budget=1 | restore budget |
 | any | non-recoverable request error | unchanged | no restart |
@@ -70,8 +71,9 @@ Owner: conversation reducer.
 - INV-3 one budget use: concurrent error and exit from the same retired client create one replacement.
 - INV-4 business errors do not restart: typed usage/auth/invalid-input cases keep the same client.
 - INV-5 stale isolation: late error, exit, and terminal event from the retired client cannot change health or current adapter.
-- INV-6 safe boundary: tests assert `data`, stack, stderr, paths, params, and raw protocol are absent from HTTP/SSE/client text.
-- INV-7 next send succeeds: runtime integration test sends explicitly after replacement.
+- INV-6 safe boundary: unknown messages fail closed; tests assert auth fields, env values, payloads, `data`, stack, stderr, paths, params, and raw protocol are absent from HTTP/SSE/client text.
+- INV-7 next send succeeds: runtime and browser integration tests send explicitly without first waiting for replacement readiness.
+- INV-8 replacement wait: delayed stop/start tests prove an immediate retry remains pending, then reaches the replacement or fails cleanly if startup fails.
 - Crash window: shutdown during replacement stops both starting and retired clients and prevents late install.
 - Recovery failure: replacement handshake failure degrades health and leaves proxy unavailable.
 - Concurrent duplicate signal: request failure followed by exit shares one restart promise and budget debit.
