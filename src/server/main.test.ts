@@ -138,6 +138,71 @@ describe("startTaskMux", () => {
     await running.shutdown()
   })
 
+  it("holds an immediate explicit retry until the replacement client is ready", async () => {
+    const retiredStop = deferred<void>()
+    const replacementStart = deferred<void>()
+    const harness = makeRuntimeHarness({
+      sendErrors: [recoverableTurnStartError()],
+      stopGates: [retiredStop],
+      startGates: [undefined, replacementStart],
+    })
+    const running = await startTaskMux(makeConfig(), harness.dependencies)
+    const conversation = await running.service.create()
+
+    await expect(running.service.sendText(conversation.id, "first attempt")).rejects.toThrow()
+    const retry = running.service.sendText(conversation.id, "immediate retry")
+    let retrySettled = false
+    void retry.finally(() => {
+      retrySettled = true
+    })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(retrySettled).toBe(false)
+    expect(harness.clients).toHaveLength(1)
+    expect(running.health()).toEqual({ status: "ok" })
+
+    retiredStop.resolve()
+    await expect.poll(() => harness.clients.length).toBe(2)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(retrySettled).toBe(false)
+    expect(harness.adapters[1]!.sendTextCalls).toEqual([])
+
+    replacementStart.resolve()
+    await expect(retry).resolves.toBeUndefined()
+    expect(harness.adapters[0]!.sendTextCalls).toEqual(["first attempt"])
+    expect(harness.adapters[1]!.sendTextCalls).toEqual(["immediate retry"])
+    await running.shutdown()
+  })
+
+  it("releases a waiting explicit retry when replacement startup fails", async () => {
+    const retiredStop = deferred<void>()
+    const replacementStart = deferred<void>()
+    const harness = makeRuntimeHarness({
+      sendErrors: [recoverableTurnStartError()],
+      stopGates: [retiredStop],
+      startGates: [undefined, replacementStart],
+      startErrors: [undefined, new Error("replacement failed")],
+    })
+    const running = await startTaskMux(makeConfig(), harness.dependencies)
+    const conversation = await running.service.create()
+
+    await expect(running.service.sendText(conversation.id, "first attempt")).rejects.toThrow()
+    const retry = running.service.sendText(conversation.id, "immediate retry")
+    retiredStop.resolve()
+    await expect.poll(() => harness.clients.length).toBe(2)
+    replacementStart.resolve()
+
+    await expect(retry).rejects.toThrow("app_server_not_started")
+    expect(running.repository.getById(conversation.id)?.status).toBe("failed")
+    expect(running.health()).toEqual({
+      status: "degraded",
+      error: {
+        code: "codex_request_failed",
+        message: "Agent service failed repeatedly. Restart TaskMux to try again.",
+      },
+    })
+    await running.shutdown()
+  })
+
   it("does not restart for a non-recoverable Codex business request failure", async () => {
     const requestError = new CodexRequestError({
       code: "codex_request_failed",
@@ -525,7 +590,8 @@ class FakeClient implements RuntimeCodexClient {
 
   constructor(
     readonly startError?: Error,
-    readonly startGate?: Deferred<void>
+    readonly startGate?: Deferred<void>,
+    readonly stopGate?: Deferred<void>
   ) {}
 
   async start(_clientInfo: CodexClientInfo): Promise<void> {
@@ -535,6 +601,7 @@ class FakeClient implements RuntimeCodexClient {
 
   async stop(): Promise<void> {
     this.stopCalls += 1
+    await this.stopGate?.promise
   }
 
   subscribe(listener: (event: CodexJsonRpcClientEvent) => void): () => void {
@@ -654,6 +721,7 @@ class FakeSignals implements RuntimeSignalSource {
 function makeRuntimeHarness(options: {
   startErrors?: Array<Error | undefined>
   startGates?: Array<Deferred<void> | undefined>
+  stopGates?: Array<Deferred<void> | undefined>
   sendErrors?: Array<CodexRequestError | undefined>
   signals?: RuntimeSignalSource
 } = {}) {
@@ -677,7 +745,8 @@ function makeRuntimeHarness(options: {
         processOptions.push(clientOptions)
         const client = new FakeClient(
           options.startErrors?.[clients.length],
-          options.startGates?.[clients.length]
+          options.startGates?.[clients.length],
+          options.stopGates?.[clients.length]
         )
         clients.push(client)
         return client

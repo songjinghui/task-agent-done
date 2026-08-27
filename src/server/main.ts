@@ -151,8 +151,8 @@ export async function startTaskMux(
       unsubscribe()
       currentClient = undefined
       currentExitUnsubscribe = undefined
-      adapterProxy.makeUnavailable("app_server_not_started")
       if (restartBudget <= 0) {
+        adapterProxy.makeUnavailable("app_server_not_started")
         health =
           failure === "exit" ? repeatedExitHealth() : repeatedRequestFailureHealth()
         if (stopClient) {
@@ -161,15 +161,8 @@ export async function startTaskMux(
         return
       }
       restartBudget -= 1
-      if (failure === "request") {
-        health = {
-          status: "degraded",
-          error: {
-            code: "codex_request_failed",
-            message: "Codex App Server is restarting after a request failure.",
-          },
-        }
-      }
+      adapterProxy.beginReplacement("app_server_not_started")
+      health = { status: "ok" }
       trackRestart(restartClient(failure, stopClient ? client : undefined))
     }
     try {
@@ -214,6 +207,7 @@ export async function startTaskMux(
       if (!closing) health = { status: "ok" }
     } catch {
       if (!closing) {
+        adapterProxy.makeUnavailable("app_server_not_started")
         health =
           failure === "exit" ? repeatedExitHealth() : repeatedRequestFailureHealth()
       }

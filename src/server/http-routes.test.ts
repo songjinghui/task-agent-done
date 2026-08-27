@@ -603,6 +603,33 @@ describe("HTTP routes", () => {
     })
   })
 
+  it("fails closed when a typed Codex error proposes an unsafe public message", async () => {
+    const harness = await createHarness()
+    const conversation = await createConversation(harness)
+    harness.adapter.sendTextError = new CodexRequestError({
+      code: "codex_request_failed",
+      message: "Authorization: Bearer bearer-private",
+      publicMessage: "Authorization: Bearer bearer-private",
+      method: "turn/start",
+      recoverable: false,
+    })
+
+    const response = await harness.app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversation.id}/messages`,
+      payload: { text: "hello" },
+    })
+
+    expect(response.statusCode).toBe(503)
+    expect(response.json()).toEqual({
+      error: {
+        code: "codex_request_failed",
+        message: "Codex App Server request failed.",
+      },
+    })
+    expect(response.body).not.toContain("bearer-private")
+  })
+
   it("rejects malformed JSON with the stable error envelope", async () => {
     const harness = await createHarness()
     const conversation = await createConversation(harness)

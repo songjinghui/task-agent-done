@@ -9,6 +9,8 @@ export class ReplaceableAgentAdapter implements AgentAdapter {
   #adapter: AgentAdapter = new UnavailableAgentAdapter("app_server_not_started")
   #unsubscribe: (() => void) | undefined
   #generation = 0
+  #replacementWait: Promise<void> | undefined
+  #replacementReady: (() => void) | undefined
 
   replace(adapter: AgentAdapter): void {
     this.#generation += 1
@@ -26,6 +28,14 @@ export class ReplaceableAgentAdapter implements AgentAdapter {
         }
       }
     })
+    this.#settleReplacement()
+  }
+
+  beginReplacement(code: string): void {
+    this.replace(new UnavailableAgentAdapter(code))
+    this.#replacementWait = new Promise((resolve) => {
+      this.#replacementReady = resolve
+    })
   }
 
   makeUnavailable(code: string): void {
@@ -38,19 +48,24 @@ export class ReplaceableAgentAdapter implements AgentAdapter {
     this.#unsubscribe = undefined
     this.#adapter.dispose?.()
     this.#adapter = new UnavailableAgentAdapter("app_server_stopped")
+    this.#settleReplacement()
   }
 
-  createSession(workspace: string): Promise<{ externalSessionId: string }> {
-    return this.#adapter.createSession(workspace)
+  async createSession(workspace: string): Promise<{ externalSessionId: string }> {
+    return (await this.#readyAdapter()).createSession(workspace)
   }
-  readSession(externalSessionId: string): Promise<MessageTurn[]> {
-    return this.#adapter.readSession(externalSessionId)
+  async readSession(externalSessionId: string): Promise<MessageTurn[]> {
+    return (await this.#readyAdapter()).readSession(externalSessionId)
   }
-  resumeSession(externalSessionId: string): Promise<void> {
-    return this.#adapter.resumeSession(externalSessionId)
+  async resumeSession(externalSessionId: string): Promise<void> {
+    return (await this.#readyAdapter()).resumeSession(externalSessionId)
   }
-  sendText(externalSessionId: string, text: string, operationId: string) {
-    return this.#adapter.sendText(externalSessionId, text, operationId)
+  async sendText(externalSessionId: string, text: string, operationId: string) {
+    return (await this.#readyAdapter()).sendText(
+      externalSessionId,
+      text,
+      operationId
+    )
   }
   cancelTurn(externalSessionId: string): Promise<void> {
     return this.#adapter.cancelTurn(externalSessionId)
@@ -61,6 +76,17 @@ export class ReplaceableAgentAdapter implements AgentAdapter {
   subscribe(handler: (event: AgentAdapterEvent) => void): () => void {
     this.#listeners.add(handler)
     return () => this.#listeners.delete(handler)
+  }
+
+  #settleReplacement(): void {
+    this.#replacementReady?.()
+    this.#replacementReady = undefined
+    this.#replacementWait = undefined
+  }
+
+  async #readyAdapter(): Promise<AgentAdapter> {
+    while (this.#replacementWait) await this.#replacementWait
+    return this.#adapter
   }
 }
 

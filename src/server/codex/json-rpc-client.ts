@@ -39,7 +39,7 @@ export class CodexRequestError extends Error {
     this.name = "CodexRequestError"
     this.code = options.code
     this.method = options.method
-    this.publicMessage = sanitizePublicErrorMessage(
+    this.publicMessage = safePublicErrorMessage(
       options.publicMessage ?? options.message
     )
     this.recoverable = options.recoverable
@@ -410,22 +410,23 @@ function isJsonRpcId(value: unknown): value is JsonRpcId {
 }
 
 function toResponseError(method: string, value: unknown): CodexRequestError {
-  const message = sanitizedErrorMessage(value)
+  const message = upstreamErrorMessage(value)
   return new CodexRequestError({
     code: "codex_request_failed",
     message,
     method,
+    publicMessage: safePublicErrorMessage(message),
     recoverable: message
       .toLowerCase()
       .includes("timeout waiting for child process to exit"),
   })
 }
 
-function sanitizedErrorMessage(value: unknown): string {
+function upstreamErrorMessage(value: unknown): string {
   if (!isRecord(value) || typeof value.message !== "string") {
     return "Codex App Server request failed."
   }
-  return sanitizePublicErrorMessage(value.message)
+  return value.message
 }
 
 function stoppedRequestError(method: string): CodexRequestError {
@@ -438,23 +439,37 @@ function stoppedRequestError(method: string): CodexRequestError {
   })
 }
 
-function sanitizePublicErrorMessage(message: string): string {
-  const firstLine = message.split(/\r?\n/, 1)[0] ?? ""
-  const sanitized = firstLine
+function safePublicErrorMessage(message: string): string {
+  const normalized = (message.split(/\r?\n/, 1)[0] ?? "")
     .replace(/[\u0000-\u001f\u007f]+/g, " ")
-    .replace(
-      /\b([A-Za-z_][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|AUTH)[A-Za-z0-9_]*)\s*=\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
-      "$1=[redacted]"
-    )
-    .replace(/file:\/\/\/?[^\s)"'`,;]*/gi, "[path]")
-    .replace(/(^|[\s("'`])(?:\\\\|\/\/)[^\s)"'`,;]*/g, "$1[path]")
-    .replace(/(^|[\s("'`])~[\\/][^\s)"'`,;]*/g, "$1[path]")
-    .replace(
-      /(^|[\s("'`])(?:[A-Za-z]:[\\/]|\/)[^\s)"'`,;]*/g,
-      "$1[path]"
-    )
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 500)
-  return sanitized || "Codex App Server request failed."
+  const lower = normalized.toLowerCase()
+  if (lower.includes("timeout waiting for child process to exit")) {
+    return "timeout waiting for child process to exit"
+  }
+  if (lower.includes("usage limit") || lower.includes("rate limit")) {
+    return "Codex usage limit reached."
+  }
+  if (
+    lower.includes("not authenticated") ||
+    lower.includes("authentication required") ||
+    lower.includes("unauthorized")
+  ) {
+    return "Codex authentication failed."
+  }
+  if (lower.includes("invalid input") || lower.includes("invalid request")) {
+    return "Codex rejected the request as invalid."
+  }
+  if (normalized === "thread_not_found") return normalized
+  if (
+    normalized === "Codex App Server request failed." ||
+    normalized === "Codex App Server request timed out." ||
+    normalized === "Codex App Server returned an invalid response." ||
+    normalized === "Codex App Server stopped accepting requests." ||
+    normalized === "Codex App Server exited unexpectedly."
+  ) {
+    return normalized
+  }
+  return "Codex App Server request failed."
 }

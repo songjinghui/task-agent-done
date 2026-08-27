@@ -156,11 +156,11 @@ test("recovers a rejected turn/start and accepts the next explicit send", async 
     "timeout waiting for child process to exit"
   )
   await expect(page.getByText(/private\/fake-app-server-state|must not cross/i)).toHaveCount(0)
-  await expect.poll(() => taskmux.clientStarts).toBe(2)
-  await expect.poll(() => taskmux.readyClientStarts).toBe(2)
   await expect(page.getByLabel("用户消息")).toHaveCount(0)
 
   await send(page, "hello after request recovery")
+  await expect.poll(() => taskmux.clientStarts).toBe(2)
+  await expect.poll(() => taskmux.readyClientStarts).toBe(2)
   await expect(page.getByLabel("用户消息")).toHaveCount(1)
   await expect(page.getByLabel("用户消息")).toContainText(
     "hello after request recovery"

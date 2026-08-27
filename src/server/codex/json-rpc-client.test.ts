@@ -57,16 +57,35 @@ function nextEvent(
 }
 
 describe("CodexJsonRpcClient", () => {
-  it("sanitizes a default public message at the typed error boundary", () => {
+  it.each([
+    "OPENAI_API_KEY: sk-private",
+    "cwd=/Users/alice/private",
+    "Authorization: Bearer bearer-private",
+    "prompt=customer-private-text",
+    "unknown provider detail",
+  ])("fails closed for an unknown public request error: %s", (message) => {
     const error = new CodexRequestError({
       code: "codex_request_failed",
-      message: "OPENAI_API_KEY=sk-private at file:///Users/alice/config.toml",
+      message,
+      publicMessage: message,
       method: "turn/start",
       recoverable: false,
     })
 
-    expect(error.publicMessage).toBe("OPENAI_API_KEY=[redacted] at [path]")
-    expect(error.message).toContain("sk-private")
+    expect(error.publicMessage).toBe("Codex App Server request failed.")
+    expect(error.message).toBe(message)
+  })
+
+  it("preserves an explicit safe diagnostic signature", () => {
+    const error = new CodexRequestError({
+      code: "codex_request_failed",
+      message: "private raw context",
+      publicMessage: "timeout waiting for child process to exit",
+      method: "turn/start",
+      recoverable: true,
+    })
+
+    expect(error.publicMessage).toBe("timeout waiting for child process to exit")
   })
 
   it("accepts a split handshake response and correlates thread/start responses", async () => {
@@ -278,13 +297,13 @@ describe("CodexJsonRpcClient", () => {
     })
   })
 
-  it("redacts filesystem paths from the public request error message", async () => {
+  it("fails closed when a request error contains a filesystem path", async () => {
     const { client } = await startClient()
     const events: CodexJsonRpcClientEvent[] = []
     client.subscribe((event) => events.push(event))
 
     await expect(client.request("test/path-error")).rejects.toMatchObject({
-      publicMessage: "failed to load [path]",
+      publicMessage: "Codex App Server request failed.",
     })
     expect(JSON.stringify(events)).not.toContain("/private/secret")
   })
@@ -296,7 +315,7 @@ describe("CodexJsonRpcClient", () => {
 
     const rejection = client.request("test/sensitive-error")
     await expect(rejection).rejects.toMatchObject({
-      publicMessage: expect.stringContaining("OPENAI_API_KEY=[redacted]"),
+      publicMessage: "Codex App Server request failed.",
     })
     const serialized = JSON.stringify(events)
     expect(serialized).not.toContain("sk-private")
