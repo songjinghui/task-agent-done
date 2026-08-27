@@ -91,6 +91,13 @@ Formal review round 1 verdict was NOT APPROVED with two Important and one Minor:
 | FR-2 | immediate retry could hit unavailable before replacement ready | replaceable adapter holds explicit operations through delayed stop/start in `e5ef568` | resolved |
 | FR-3 | automatic recovery could briefly show manual restart action | automatic in-progress health remains ok; degraded action only after failure/exhaustion in `e5ef568` | resolved |
 
+Re-review evidence on `8db693c`: focused 5 files / 177 tests, typecheck, and
+Chromium 10/10 all passed independently. Reviewer confirmed no remaining
+Critical or Important finding and prepared `APPROVED with Minor`; its final
+formatted response was interrupted by reviewer quota after that conclusion was
+reported. The retained Minor is the idempotence of two already-safe normalized
+messages and is non-blocking.
+
 Formal reviewer: please label findings `[FC:covered]`, `[FC:new]`, or `[FC:N/A]`.
 
 ## Next Action

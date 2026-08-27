@@ -55,6 +55,21 @@ Minor. `e5ef568` resolves all three with RED/GREEN coverage:
 | Immediate explicit retry could hit the temporary unavailable adapter | Existing replaceable adapter now holds operations until replacement settles | Delayed stop and delayed start test proves retry remains pending and reaches only the replacement |
 | Automatic recovery could display the manual restart action before recovery finished | Health stays `ok` during the bounded automatic replacement; degraded/manual action appears only on failure or exhausted budget | Runtime test checks in-progress and failed health; full browser crash/request recovery paths pass |
 
+## Independent Re-review
+
+The same independent reviewer re-read `8db693c`, reran the high-risk suites
+(5 files / 177 tests), typecheck, and Chromium E2E (10/10), and confirmed both
+round-1 Important findings plus the related Minor were resolved. It reported no
+remaining Critical or Important finding and prepared an `APPROVED with Minor`
+verdict; delivery of the final formatted message was interrupted by the
+reviewer's usage limit after the evidence and conclusion had already been sent.
+
+One non-blocking Minor remains documented: two fixed safe normalized messages
+(`Codex authentication failed.` and `Codex rejected the request as invalid.`)
+become the generic safe provider message if normalized a second time. This can
+reduce diagnostic specificity but cannot expose private data, consume restart
+budget incorrectly, replay a prompt, or prevent recovery.
+
 ## Stateful Invariants
 
 - INV-1 through INV-8 from the plan are covered by focused runtime, service, HTTP, reducer, and E2E tests.
