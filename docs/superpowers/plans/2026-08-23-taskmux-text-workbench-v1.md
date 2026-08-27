@@ -1,4 +1,14 @@
+---
+feature_ids: [taskmux-historical-text-workbench-v1]
+topics: [taskmux, codex, implementation, product-history]
+doc_kind: archived-plan
+created: 2026-08-23
+superseded_by: docs/superpowers/specs/2026-08-27-taskmux-v0-multi-agent-foundation-design.md
+---
+
 # TaskMux Text Workbench V1 Implementation Plan
+
+> **已被取代。** 本计划仅用于解释现有实现的来源，不再驱动新的开发工作。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

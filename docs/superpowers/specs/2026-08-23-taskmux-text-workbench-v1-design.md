@@ -1,4 +1,14 @@
+---
+feature_ids: [taskmux-historical-text-workbench-v1]
+topics: [taskmux, codex, conversation, product-history]
+doc_kind: archived-spec
+created: 2026-08-23
+superseded_by: docs/superpowers/specs/2026-08-27-taskmux-v0-multi-agent-foundation-design.md
+---
+
 # TaskMux 纯文本 Agent Workbench V1 设计
+
+> **已被取代。** 本文记录已经实现的 Codex 文本工作台切片，不再定义 TaskMux 的产品终态或下一阶段。
 
 **状态：** 已批准，可进入实施计划
 
