@@ -3,7 +3,8 @@ feature_ids: [taskmux-v0-interaction-kernel]
 topics: [taskmux, single-agent, multi-agent, conversation, ux, architecture]
 doc_kind: spec
 created: 2026-08-27
-status: draft-awaiting-review
+status: approved
+approved: 2026-08-27
 supersedes:
   - docs/superpowers/specs/2026-08-23-taskmux-text-workbench-v1-design.md
 source_threads:
