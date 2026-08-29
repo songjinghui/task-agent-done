@@ -59,6 +59,8 @@ Codex 或 Claude。会话内的 Agent 身份、Execution 和 Provider Session �
 - 引入共用 ACP client 和 runtime registry；
 - 通过 `claude-agent-acp` 创建、加载、恢复和运行 Claude Session；
 - 支持流式文本、工具状态、取消、知情审批、刷新和服务重启恢复；
+- 完成具名 Agent 等待态、失败后显式重试、安全 Markdown/代码复制和
+  用户上滚保护；
 - 用真实 Claude 在隔离 Workspace 完成验收。
 
 Delivery A 期间 Codex 继续走 raw App Server，仅作为迁移期兼容。
@@ -177,6 +179,7 @@ Session。
 ### 5.2 HTTP API
 
 ```text
+GET   /api/providers
 POST  /api/threads                    { provider }
 GET   /api/threads?view=active|archived
 GET   /api/threads/:threadId
@@ -186,6 +189,8 @@ POST  /api/threads/:threadId/restore
 ```
 
 - `provider` 只在创建时接受，之后所有更新请求都拒绝它；
+- Provider 列表返回 `available | unavailable` 与 sanitized diagnostic，供新建
+  选择器使用；全局 health 不代替逐 Provider 状态；
 - title 必须去除首尾空白、非空并限制 code point 长度；
 - 归档运行中 Thread 返回 `409 thread_running`；
 - restore 幂等，重复恢复保持成功；
@@ -295,6 +300,14 @@ ACP `session/update` 映射为文本增量、工具状态与终态。Adapter 必
 - restore 后回到活跃列表；
 - 首版没有永久删除入口。
 
+### 单 Agent 对话体验
+
+- 发送后立即显示用户消息和具名 Agent 等待气泡，不等待 Provider 首 token；
+- Markdown/GFM 与围栏代码块安全渲染，raw HTML 不执行，代码可复制；
+- 用户停留底部时跟随流式内容，主动上滚后不抢夺阅读位置；
+- 失败、取消、重连和显式重试都有独立状态，重试生成新的 request identity，
+  不重复旧的乐观消息。
+
 ## 11. 测试策略
 
 ### 11.1 共用 ACP contract suite
@@ -323,6 +336,8 @@ ACP `session/update` 映射为文本增量、工具状态与终态。Adapter 必
 - Provider chooser 与 disabled diagnostic；
 - 不同 Provider 会话切换时 live state 不串线；
 - pending bubble、断线恢复与 history replay 不重复；
+- Markdown/代码复制、raw HTML 禁用和用户上滚保护；
+- 失败重试生成新 request identity，且只出现一个新的乐观消息对；
 - rename、archive、restore 的乐观状态只在 HTTP 接受后持久；
 - 浏览器刷新和服务重启后恢复同一 Session；
 - 两个 Provider 会话并发时各自可取消和审批。
@@ -354,6 +369,8 @@ outcome。fake E2E 不能替代真实 Provider 验收。
 - AC-10：所有单元、组件、E2E、typecheck、build 和真实 Provider 门禁通过。
 - AC-11：三个交付分别完成独立跨个体 Review，不 self-review。
 - AC-12：历史设计明确 superseded，仓库只有本文件作为活跃产品真相源。
+- AC-13：单 Agent 首版保留即时等待、Markdown/代码复制、跟随滚动、取消、
+  失败重试和知情审批，不因 Provider/会话管理扩展而退化。
 
 ## 13. 明确不做
 
