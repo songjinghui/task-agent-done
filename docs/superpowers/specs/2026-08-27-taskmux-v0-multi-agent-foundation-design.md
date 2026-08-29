@@ -3,8 +3,9 @@ feature_ids: [taskmux-v0-interaction-kernel]
 topics: [taskmux, single-agent, multi-agent, conversation, ux, architecture]
 doc_kind: spec
 created: 2026-08-27
-status: approved
+status: superseded
 approved: 2026-08-27
+superseded_by: docs/superpowers/specs/2026-08-30-taskmux-acp-providers-and-session-management-design.md
 supersedes:
   - docs/superpowers/specs/2026-08-23-taskmux-text-workbench-v1-design.md
 source_threads:

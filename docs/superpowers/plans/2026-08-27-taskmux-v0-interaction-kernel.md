@@ -3,8 +3,9 @@ feature_ids: [taskmux-v0-interaction-kernel]
 topics: [taskmux, implementation, multi-agent, single-agent, ux]
 doc_kind: plan
 created: 2026-08-27
-status: approved
+status: superseded
 source_spec: docs/superpowers/specs/2026-08-27-taskmux-v0-multi-agent-foundation-design.md
+superseded_by: docs/superpowers/specs/2026-08-30-taskmux-acp-providers-and-session-management-design.md
 ---
 
 # TaskMux V0 Interaction Kernel Implementation Plan

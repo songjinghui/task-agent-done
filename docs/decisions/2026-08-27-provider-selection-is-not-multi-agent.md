@@ -3,7 +3,8 @@ feature_ids: [taskmux-v0-interaction-kernel]
 topics: [taskmux, multi-agent, provider, acp, architecture]
 doc_kind: decision
 created: 2026-08-27
-status: accepted
+status: superseded
+superseded_by: docs/superpowers/specs/2026-08-30-taskmux-acp-providers-and-session-management-design.md
 source_threads:
   - thread_msyk6u7unsyd1mh3
   - thread_mtbh922hu8iqtyum
