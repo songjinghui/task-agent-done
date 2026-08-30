@@ -15,7 +15,7 @@ source_threads:
 
 **Feature:** `docs/superpowers/specs/2026-08-30-taskmux-acp-providers-and-session-management-design.md`
 **Goal:** Deliver a production-usable N=1 interaction slice over Claude and Codex ACP, then add persistent TaskMux session management without collapsing Thread, Execution, and Provider Session identities.
-**Acceptance Criteria:** AC-1 through AC-13 from the approved design, including real-provider gates and independent review for Deliveries A, B, and C.
+**Acceptance Criteria:** AC-1 through AC-16 from the approved design, including the B × C activity hierarchy, thought privacy, non-overlapping Composer geometry, real-provider gates, and independent review for Deliveries A, B, and C.
 **Architecture cell:** N/A — this repository does not yet maintain `docs/architecture/ownership/`.
 **Map delta:** none
 **Map delta why:** The approved spec is the ownership truth source for this prototype; adding a second architecture registry would duplicate it.
@@ -27,7 +27,7 @@ source_threads:
 
 ## Finish line
 
-TaskMux can create, resume, use, rename, archive, and restore permanent Codex or Claude conversations; both providers can run concurrently without state leakage; raw Codex App Server code is gone only after old-session ACP continuation passes; and the N=1 waiting, Markdown, copy, scroll, cancel, retry, and informed-approval experience passes fake and real-provider acceptance.
+TaskMux can create, resume, use, rename, archive, and restore permanent Codex or Claude conversations; both providers can run concurrently without state leakage; raw Codex App Server code is gone only after old-session ACP continuation passes; and the N=1 experience presents pure chat as a B answer bubble, real tool work as a turn-scoped collapsible C activity module above that bubble, private reasoning as no user-facing chain-of-thought, and a Composer that never covers the message viewport. Waiting, Markdown, copy, scroll, cancel, retry, informed approval, refresh, and restart all pass fake and real-provider acceptance.
 
 Not building: a second Agent in one Thread, `@Agent` routing, Handoff UI, provider switching after creation, external CLI session import, automatic provider fallback, permanent deletion, search, tags, folders, or hosted credentials.
 
@@ -54,6 +54,20 @@ type InteractionThreadSummary = {
 
 type StoredAgentExecution = AgentExecutionSummary & {
   externalSessionId: string
+}
+
+type TurnActivity = {
+  id: string
+  kind: "tool"
+  label: string
+  status: "running" | "completed" | "failed" | "declined"
+}
+
+type InteractionMessageTurn = MessageTurn & {
+  executionId: string
+  agentId: string
+  displayName: string
+  activities: TurnActivity[]
 }
 
 interface ProviderAgentAdapter extends AgentAdapter {
@@ -135,6 +149,8 @@ Lifecycle owner: `InteractionService`, keyed by `executionId`.
 - INV-11: only current Session + operation/epoch events can mutate a turn.
 - INV-12: terminal paths settle state, locks, and approvals at most once.
 - INV-13: retry creates a new request identity and one new optimistic message pair.
+- INV-13a: every public tool event carries the owning `turnId`; an activity can mutate only that Assistant Turn.
+- INV-13b: `agent_thought_chunk` content is dropped at the ACP adapter boundary and cannot enter public events, ordinary logs, browser state, or message history.
 
 Adversarial tests: cancel before prompt response; late old terminal after retry; duplicate terminal; foreign Session update; provider crash during approval.
 
@@ -156,6 +172,8 @@ Lifecycle owner: `InteractionStore`; server events are authoritative after HTTP 
 - INV-18: history replay epoch cannot duplicate live content.
 - INV-19: user messages and waiting bubbles render immediately, but a Thread is not persisted optimistically before create succeeds.
 - INV-20: auto-scroll follows only while the user is already near the bottom.
+- INV-21: pure chat retires transient Thinking and leaves only its B answer bubble; real tool activity remains attached to the owning Assistant Turn and restores after refresh.
+- INV-22: Header, message viewport, and Composer occupy separate layout rows at desktop and narrow widths; the viewport owns scrolling and the Composer never overlays it.
 
 Adversarial tests: switch threads during a stream; reconnect replay overlaps live epoch; send fails before first token; retry after terminal failure; upward scroll during streaming.
 
@@ -285,7 +303,79 @@ Demo: retrying the same create request returns one permanent Thread and one prov
 
 Demo: before first token the named Agent is visibly waiting; code copies; user scroll position is respected.
 
-### Task A8: Fake and real Claude acceptance
+### Task A8: Bind activity to turns and finish the B × C conversation hierarchy
+
+**Files:**
+- Modify: `src/shared/contracts.ts`
+- Modify: `src/shared/contracts.test.ts`
+- Modify: `src/server/agent/agent-adapter.ts`
+- Modify: `src/server/acp/acp-adapter.ts`
+- Modify: `src/server/acp/acp-adapter.test.ts`
+- Modify: `src/server/codex/codex-adapter.ts`
+- Modify: `src/server/codex/codex-adapter.test.ts`
+- Modify: `src/server/interaction-service.ts`
+- Modify: `src/server/interaction-service.test.ts`
+- Modify: `src/client/api.ts`
+- Modify: `src/client/api.test.ts`
+- Modify: `src/client/interaction-store.tsx`
+- Modify: `src/client/interaction-store.test.tsx`
+- Modify: `src/client/App.tsx`
+- Modify: `src/client/App.test.tsx`
+- Modify: `src/client/components/Thread.tsx`
+- Modify: `src/client/components/Thread.test.tsx`
+- Create: `src/client/components/ActivityModule.tsx`
+- Create: `src/client/components/ActivityModule.test.tsx`
+- Create: `src/client/components/ThinkingIndicator.tsx`
+- Create: `src/client/components/ThinkingIndicator.test.tsx`
+- Delete: `src/client/components/ToolLine.tsx`
+- Modify: `src/client/styles.css`
+- Modify: `tests/fixtures/fake-acp-agent.mjs`
+- Modify: `tests/e2e/workbench.spec.ts`
+
+#### A8.1 — Make turn ownership and thought privacy contractual
+
+1. Add Red contract/API tests for `TurnActivity`, mandatory `InteractionMessageTurn.activities`, and `{ type: "tool_status"; turnId; tool }`. Reject missing/blank `turnId`, invalid activity kinds/statuses, activities on a user Turn, and every public event shaped like `agent_thought_chunk` or carrying thought text.
+2. Add `TurnActivity` to the shared contract; make history adapters return normalized activities with every Turn and make the browser decoder require `activities: []` even for pure chat.
+3. Update raw Codex history projection to return `activities: []` so Delivery A remains compatible without inventing tool history that the old transport cannot prove.
+4. Run `pnpm vitest run src/shared/contracts.test.ts src/client/api.test.ts src/server/codex/codex-adapter.test.ts` and commit the contract seam with the rest of A8, not as an independently shippable schema.
+
+#### A8.2 — Normalize live and replayed ACP activity without exposing thought text
+
+1. Add Red adapter tests showing that live `tool_call` / `tool_call_update` produce `tool_status` with the current operation as `turnId`, repeated updates keep one activity identity, replayed tool updates attach to the following/current Assistant Turn in stream order, and `agent_thought_chunk` produces no listener event and no history text.
+2. Extend the replay collector to maintain an ordered pending activity map. User message chunks start a user Turn; tool events accumulate normalized activities for the in-progress assistant response; agent message chunks create or extend that Assistant Turn and receive those activities. A replay containing tool activity but no Assistant message emits no orphan activity Turn.
+3. Preserve only `id`, `kind: "tool"`, bounded display label, and normalized status. Do not persist or publish raw input, raw output, thought content, command text, Diff, or Provider metadata through this projection.
+4. Extend the fake ACP agent so `session/load` replays text and tool updates in their original order. Add refresh/restart adapter tests proving the same completed activity returns on the same Assistant Turn.
+5. Run `pnpm vitest run src/server/acp/acp-adapter.test.ts src/server/interaction-service.test.ts`.
+
+If either real Provider fails to replay stable tool events during Task A9, Delivery A remains Red. Add a server-side normalized activity projection only after that failure is reproduced and covered by a repository test; never silently accept lost C modules or duplicate full message persistence.
+
+#### A8.3 — Replace Execution-global tools with per-Turn activity state
+
+1. Add Red reducer tests for two sequential Turns in one Execution, interleaved events in different Executions, an event with the wrong `turnId`, optimistic Assistant ID rebinding, terminal completion, detail refresh, and reconnect. Assert that one Turn can never display another Turn's activity.
+2. Replace `toolsById` / `toolOrder` with `activitiesByTurnId: Record<string, { byId: Record<string, TurnActivity>; order: string[] }>` and replace `selectTools(state, executionId)` with `selectActivities(state, executionId, turnId)`.
+3. On `turn_started`, atomically move the optimistic Assistant Turn and any pre-bound activity bucket to the authoritative `turnId`. Accept `tool_status` only when its `turnId` can bind to the current request attempt; ignore stale, terminal, or foreign Turn activity.
+4. Make `selectDisplayedTurns` merge transient activity state onto live Assistant Turns while persisted detail already carries its own `activities`. Retiring optimistic Turns after a successful detail load must not retire an active Turn or duplicate restored activities.
+5. Run `pnpm vitest run src/client/interaction-store.test.tsx src/client/App.test.tsx`.
+
+#### A8.4 — Render Thinking, C activity, and B answer as one Turn
+
+1. Add Red component tests with fake timers: the named empty Assistant placeholder exists immediately; Thinking text is absent at 399ms and visible at 400ms; first text suppresses/removes Thinking; first tool activity replaces Thinking with C; pure-chat completion leaves only B; tool completion leaves a collapsed C summary directly above B.
+2. Implement `ThinkingIndicator` as a cancellable 400ms presentation timer. Its only fallback copy is `{displayName} 正在思考…` plus `等待模型响应`; it consumes no raw provider reasoning.
+3. Implement `ActivityModule` as a semantic list within the owning Assistant Turn wrapper. It is expanded while any activity is running or awaiting approval, collapses after terminal completion, retains explicit icon + text status, and exposes a button with `aria-expanded` for completed detail.
+4. Render each Assistant Turn as `ActivityModule` then B message bubble inside one `.assistant-turn` container. Delete the Execution-global tool list and `ToolLine`; approvals remain explicit bounded interaction UI associated with the active Turn.
+5. Run `pnpm vitest run src/client/components/ThinkingIndicator.test.tsx src/client/components/ActivityModule.test.tsx src/client/components/Thread.test.tsx src/client/App.test.tsx`.
+
+#### A8.5 — Move Composer into a non-overlapping three-row layout
+
+1. Add a Red Playwright geometry assertion at `1280×720` and `390×720`: `messageViewport.bottom <= composer.top`, the last message can scroll fully above the Composer, and the Composer remains inside the visible work area.
+2. Make `.thread` a height-constrained grid with `grid-template-rows: auto minmax(0, 1fr) auto`; move approvals/errors into the third-row interaction rail with the Composer or reserve explicit rows without overlay.
+3. Set `.message-viewport { min-height: 0; max-height: none; overflow-y: auto; }` and `.composer { position: static; bottom: auto; }`. Remove the narrow-screen `52vh` cap and preserve one near-bottom scroll policy for text, Thinking, activity expansion/collapse, and approvals.
+4. Run the focused Playwright test, then `pnpm typecheck && pnpm build`.
+5. Commit `feat: add turn-scoped agent activity UX`.
+
+Demo: a pure chat Turn shows only B after completion; a tool Turn shows C above its B bubble, collapses on completion, survives refresh, and never displays raw thought text. At both acceptance viewports, the final reply is fully visible above the Composer.
+
+### Task A9: Fake and real Claude acceptance
 
 **Files:**
 - Modify: `tests/e2e/server.ts`
@@ -298,7 +388,7 @@ Demo: before first token the named Agent is visibly waiting; code copies; user s
 1. Add failing E2E for create/switch/stream/cancel/approval/refresh/restart/retry and no cross-provider leakage.
 2. Make the isolated E2E harness launch the fake ACP provider on non-reserved ports.
 3. Add an opt-in real Claude smoke using a temporary Workspace and sanitized latency report.
-4. Run unit, component, E2E, typecheck, build, and real Claude ten-turn acceptance.
+4. Run unit, component, E2E, typecheck, build, and real Claude ten-turn acceptance, including one tool Turn restored after refresh and process restart.
 5. Commit `test: accept Claude ACP vertical slice`.
 6. Run `quality-gate`, then request independent review before Delivery A merge.
 
@@ -397,7 +487,7 @@ Demo: before first token the named Agent is visibly waiting; code copies; user s
 1. Add E2E for rename/archive/restore persistence, two-provider concurrency, independent cancel/approval, refresh, server restart, runtime restart, and history preservation.
 2. Run all deterministic gates in an isolated data directory and ports other than 3003/3004.
 3. Run real Claude and Codex ten-turn matrices in disposable Workspaces, including command/file approvals and Session continuation.
-4. Run `quality-gate`; verify AC-1 through AC-13 and vision wording against the original thread.
+4. Run `quality-gate`; verify AC-1 through AC-16 and vision wording against the original thread.
 5. Request independent review for Delivery C, address findings through `receive-review`, and only then enter `merge-gate`.
 
 ## Verification commands
@@ -409,10 +499,12 @@ pnpm build
 pnpm test:e2e
 pnpm smoke:claude
 pnpm smoke:codex
+pnpm vitest run src/shared/contracts.test.ts src/server/acp/acp-adapter.test.ts src/client/interaction-store.test.tsx src/client/components/Thread.test.tsx
 rg -n 'thread/start|turn/start|item/commandExecution|CodexJsonRpcClient|CodexAppServerAdapter' src tests scripts
+rg -n 'agent_thought_chunk|thought.*text|reasoning.*text' src/client src/shared
 ```
 
-Expected final result: all deterministic and real-provider gates pass; the final `rg` returns no raw-stack implementation references; public contract probes contain no external Session identity; each delivery has an independent review record.
+Expected final result: all deterministic and real-provider gates pass; B and C remain turn-scoped across refresh/restart; Composer geometry never overlaps at either viewport; the final `rg` returns no raw-stack implementation references and no browser-facing raw thought projection; public contract probes contain no external Session identity; each delivery has an independent review record.
 
 ## Open questions resolved autonomously
 
