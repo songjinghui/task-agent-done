@@ -3,7 +3,7 @@ feature_ids:
   - taskmux-v0-interaction-kernel
   - taskmux-acp-providers
   - taskmux-session-management
-topics: [taskmux, acp, codex, claude, sessions, multi-agent, architecture]
+topics: [taskmux, acp, codex, claude, sessions, multi-agent, architecture, ui, thinking]
 doc_kind: spec
 created: 2026-08-30
 status: approved
@@ -168,6 +168,33 @@ type AgentExecutionSummary = {
 }
 ```
 
+完整历史投影中的 Agent Turn 还可以携带归一化活动摘要：
+
+```ts
+type TurnActivity = {
+  id: string
+  kind: "tool"
+  label: string
+  status: "running" | "completed" | "failed" | "declined"
+}
+
+type InteractionMessageTurn = {
+  id: string
+  executionId: string
+  agentId: string
+  displayName: string
+  role: "user" | "assistant"
+  text: string
+  status: "pending" | "completed" | "interrupted" | "failed"
+  activities: TurnActivity[]
+}
+```
+
+活动必须归属于具体 Assistant Turn，不能只保存在 Execution 级的“当前工具”
+数组。历史加载必须恢复已完成活动摘要；如果真实 Provider 的 `session/load`
+无法稳定重放并关联工具历史，实现必须持久化归一化活动投影，而不是在刷新后
+静默丢失 C 模块。
+
 SQLite 的 `interaction_thread` 增加可空 `archived_at`；`agent_execution.provider`
 约束扩展为 `codex | claude`。`external_session_id` 只存在于 server-side stored
 type，公共 DTO 不暴露其写入口。
@@ -247,6 +274,9 @@ type InteractionEventEnvelope = {
 
 ACP `session/update` 映射为文本增量、工具状态与终态。Adapter 必须按 Session
 和当前 operation 归属事件；迟到、重复和错误 Session 的事件不得结束新的 Turn。
+公共 `tool_status` 事件必须携带 `turnId`，使同一 Execution 内连续 Turn 的活动
+不会串线。`agent_thought_chunk` 只更新受控的运行存活状态，其文本在 Adapter
+边界丢弃，不进入公共事件 envelope。
 
 审批使用 ACP request/response 语义：
 
@@ -308,6 +338,48 @@ ACP `session/update` 映射为文本增量、工具状态与终态。Adapter 必
 - 失败、取消、重连和显式重试都有独立状态，重试生成新的 request identity，
   不重复旧的乐观消息。
 
+### 对话与活动的视觉层级
+
+界面采用 co-creator 批准的 `B × C` 双层投影：
+
+1. **B 是回答层。** 用户消息与 Agent 最终回答保持自然的对话气泡；纯聊天
+   完成后不得残留空活动卡或把长回答包装成运行仪表盘。
+2. **C 是活动层。** 本轮真实发生工具调用时，在对应 Agent 气泡上方增加
+   活动模块；模块与该轮回答共同归属于同一 Turn，不得漂浮到全局状态区。
+3. 活动模块只显示有事件依据的工具名称、状态与可用结果摘要。详细命令、
+   bounded Diff、错误和审批继续进入按需展开层，不默认淹没对话。
+4. 运行时活动模块展开；Turn 完成后折叠为简短摘要。没有工具调用的 Turn
+   完成后只保留 B 气泡。
+5. `running`、`completed`、`failed`、`declined` 与等待审批不能只靠颜色区分，
+   必须同时提供文字或图标语义。
+
+### Thinking 与等待态
+
+Thinking 是本轮 Agent 的临时运行态，不是聊天消息，也不是第二张永久卡片：
+
+- 发送后在 200ms 内创建具名 Agent 占位气泡；若 400ms 内已有首个有效事件，
+  不额外闪现 Thinking 文案；超过 400ms 才显示“正在思考”。
+- Provider 没有可靠进度事件时，副文案只能是“等待模型响应”，不得由前端
+  编造“正在检索”“正在比较方案”等阶段。
+- 第一条工具事件到达后，Thinking 进入 C 活动模块并由真实工具状态驱动；
+  第一条文本增量到达后，B 气泡开始流式回答。
+- 纯聊天完成后移除临时 Thinking；发生过工具调用的 Turn 保留折叠活动摘要。
+- ACP `agent_thought_chunk` 表示内部 reasoning。V0 不把其文本发送到浏览器、
+  写入普通日志或持久化为消息；它最多作为运行仍存活的信号。未来只有在
+  Provider 契约明确标注为 user-facing summary 时，才能另行设计可选摘要层。
+- 原始思维链不是审计依据。可验证依据来自工具事件、文件/命令/Diff、审批、
+  测试结果和最终决策说明。
+
+### Composer 与滚动坐标系
+
+页面主体必须使用三个互不覆盖的布局行：Header、可滚动消息视口、Composer。
+消息视口使用剩余高度并自行滚动；Composer 位于正常布局流的第三行，不得用
+`sticky`、`fixed` 或绝对定位侵入消息视口。桌面和窄屏下，最后一条消息都必须
+能完整滚动到 Composer 上方。
+
+自动滚动仍遵循用户意图：停留底部时跟随流式内容；用户主动上滚后不抢夺位置；
+Thinking、工具状态和折叠摘要的高度变化也必须经过同一 near-bottom 判定。
+
 ## 11. 测试策略
 
 ### 11.1 共用 ACP contract suite
@@ -337,6 +409,12 @@ ACP `session/update` 映射为文本增量、工具状态与终态。Adapter 必
 - 不同 Provider 会话切换时 live state 不串线；
 - pending bubble、断线恢复与 history replay 不重复；
 - Markdown/代码复制、raw HTML 禁用和用户上滚保护；
+- 纯聊天完成后只有 B 气泡；工具 Turn 的 C 活动模块位于对应 Agent 气泡上方，
+  并在完成后折叠；
+- 使用 fake timers 验证 400ms Thinking 阈值、首事件状态转换与纯聊天完成后清理；
+- `agent_thought_chunk` 文本不进入公共 SSE、DOM、浏览器状态或普通日志；
+- 完成的工具活动在刷新和服务重启后仍恢复到原 Assistant Turn；
+- 在 1280×720 与 390×720 视口断言消息视口和 Composer 几何边界不重叠；
 - 失败重试生成新 request identity，且只出现一个新的乐观消息对；
 - rename、archive、restore 的乐观状态只在 HTTP 接受后持久；
 - 浏览器刷新和服务重启后恢复同一 Session；
@@ -371,6 +449,12 @@ outcome。fake E2E 不能替代真实 Provider 验收。
 - AC-12：历史设计明确 superseded，仓库只有本文件作为活跃产品真相源。
 - AC-13：单 Agent 首版保留即时等待、Markdown/代码复制、跟随滚动、取消、
   失败重试和知情审批，不因 Provider/会话管理扩展而退化。
+- AC-14：纯聊天使用 B 气泡；只有真实工具事件产生 C 活动模块，模块始终位于
+  所属 Agent 气泡上方，完成后折叠、刷新后恢复且不污染其他 Turn。
+- AC-15：Thinking 遵守 200ms 占位与 400ms 文案阈值，不编造进度；原始
+  `agent_thought_chunk` 不进入浏览器、普通日志或消息持久层。
+- AC-16：桌面与窄屏的 Composer 均不覆盖消息视口，最后一条消息可完整滚动到
+  Composer 上方。
 
 ## 13. 明确不做
 
