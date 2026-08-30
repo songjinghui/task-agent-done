@@ -330,6 +330,7 @@ Demo: before first token the named Agent is visibly waiting; code copies; user s
 - Create: `src/client/components/ThinkingIndicator.tsx`
 - Create: `src/client/components/ThinkingIndicator.test.tsx`
 - Delete: `src/client/components/ToolLine.tsx`
+- Delete: `src/client/components/ToolLine.test.tsx`
 - Modify: `src/client/styles.css`
 - Modify: `tests/fixtures/fake-acp-agent.mjs`
 - Modify: `tests/e2e/workbench.spec.ts`
