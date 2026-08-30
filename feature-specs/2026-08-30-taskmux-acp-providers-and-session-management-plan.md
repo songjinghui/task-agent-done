@@ -317,6 +317,8 @@ Demo: before first token the named Agent is visibly waiting; code copies; user s
 - Modify: `src/server/interaction-service.test.ts`
 - Modify: `src/client/api.ts`
 - Modify: `src/client/api.test.ts`
+- Modify: `src/client/use-event-stream.ts`
+- Modify: `src/client/use-event-stream.test.tsx`
 - Modify: `src/client/interaction-store.tsx`
 - Modify: `src/client/interaction-store.test.tsx`
 - Modify: `src/client/App.tsx`
@@ -334,10 +336,10 @@ Demo: before first token the named Agent is visibly waiting; code copies; user s
 
 #### A8.1 — Make turn ownership and thought privacy contractual
 
-1. Add Red contract/API tests for `TurnActivity`, mandatory `InteractionMessageTurn.activities`, and `{ type: "tool_status"; turnId; tool }`. Reject missing/blank `turnId`, invalid activity kinds/statuses, activities on a user Turn, and every public event shaped like `agent_thought_chunk` or carrying thought text.
+1. Add Red contract/API/SSE tests for `TurnActivity`, mandatory `InteractionMessageTurn.activities`, and `{ type: "tool_status"; turnId; tool }`. Reject missing/blank `turnId`, invalid activity kinds/statuses, activities on a user Turn, and every public event shaped like `agent_thought_chunk` or carrying thought text.
 2. Add `TurnActivity` to the shared contract; make history adapters return normalized activities with every Turn and make the browser decoder require `activities: []` even for pure chat.
 3. Update raw Codex history projection to return `activities: []` so Delivery A remains compatible without inventing tool history that the old transport cannot prove.
-4. Run `pnpm vitest run src/shared/contracts.test.ts src/client/api.test.ts src/server/codex/codex-adapter.test.ts` and commit the contract seam with the rest of A8, not as an independently shippable schema.
+4. Run `pnpm vitest run src/shared/contracts.test.ts src/client/api.test.ts src/client/use-event-stream.test.tsx src/server/codex/codex-adapter.test.ts` and commit the contract seam with the rest of A8, not as an independently shippable schema.
 
 #### A8.2 — Normalize live and replayed ACP activity without exposing thought text
 
